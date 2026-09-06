@@ -565,3 +565,33 @@ class UserSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WorldEvent(Base):
+    """A GDELT Event Database 2.0 record matching the curated CAMEO code allowlist
+    (see collectors/world_events.py) -- explosions, warfare, targeted/mass violence, or
+    a high-level diplomatic meeting. id is GDELT's own GLOBALEVENTID, so re-ingesting
+    the same event (a backfill re-covering a window collect() already filled) is a
+    plain no-op upsert, never a duplicate row."""
+
+    __tablename__ = "world_events"
+    __table_args__ = (
+        Index("idx_world_events_geom", "geom", postgresql_using="gist"),
+        Index("idx_world_events_event_date", "event_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    category: Mapped[str] = mapped_column(String(20), nullable=False)
+    event_code: Mapped[str | None] = mapped_column(String(10))
+    actor1_name: Mapped[str | None] = mapped_column(Text)
+    actor2_name: Mapped[str | None] = mapped_column(Text)
+    action_geo_full_name: Mapped[str | None] = mapped_column(Text)
+    lat: Mapped[float | None] = mapped_column(REAL)
+    lon: Mapped[float | None] = mapped_column(REAL)
+    geom: Mapped[str | None] = mapped_column(Geometry("POINT", srid=4326, spatial_index=False))
+    event_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    num_mentions: Mapped[int | None] = mapped_column(Integer)
+    num_sources: Mapped[int | None] = mapped_column(Integer)
+    goldstein_scale: Mapped[float | None] = mapped_column(REAL)
+    avg_tone: Mapped[float | None] = mapped_column(REAL)
+    source_url: Mapped[str | None] = mapped_column(Text)

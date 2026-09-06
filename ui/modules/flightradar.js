@@ -485,17 +485,84 @@ const FLIGHTRADAR_ICONS = [
 
 // docs/adr/0008: category C* (ground vehicles/obstacles) is filtered out entirely --
 // done here at feature-build time rather than as a MapLibre style filter, so the style
-// itself only needs the altitude density step. Position AND altitude are dead-reckoned
-// from each record's last known state -- see interpolatedPosition/extrapolatedAltitude/
-// boundedElapsedSeconds above.
+// itself only needs the altitude density step.
 //
-// displayByHex/dtS/tauS (all optional) opt into correction smoothing (smoothedPosition
-// above): when displayByHex is given, the rendered position AND (when numeric)
-// altitude ease from that hex's previous displayed state toward the freshly
-// dead-reckoned target rather than jumping straight to it, and displayByHex is
-// updated in place so the NEXT call eases from here. displayByHex=null (the default)
-// skips smoothing entirely -- every pre-existing caller/test gets the exact raw
-// target, unchanged.
+// Orchestrates dead-reckoning (interpolatedPosition/extrapolatedAltitude) and, when
+// there's a prior displayed state to ease from, correction-smoothing on top
+// (smoothedPosition/bearingDeg/smoothedAngle/smoothedScalar, plus isBackwardCorrection's
+// hold-in-place special case) -- everything buildFeatureCollection needs to know about
+// ONE aircraft's next {pos, altBaroFt, iconTrack}. Kept separate from GeoJSON assembly
+// so this orchestration -- the source of most of this file's real, live-caught bugs
+// (the icon twitch, the backward slide on final approach, the sideways takeoff roll) --
+// has its own direct test surface instead of being read back out of a Feature's
+// geometry/properties.
+//
+// prevDisplay=null/undefined (a genuine first sighting, or the caller opting out of
+// smoothing entirely by never populating a displayByHex map) skips easing: pos/altBaroFt
+// come back exactly as dead-reckoned, iconTrack falls back to the raw reported track.
+//
+// deadReckonGs/deadReckonBaroRate (recordFromFeature) fall back to the raw gs/baro_rate
+// for any caller/test that doesn't set them -- only recordFromFeature actually forces
+// them to 0 (see its docstring for the stalled-position case).
+export function deriveDisplayState(rec, elapsed, prevDisplay, dtS, tauS) {
+    const target = interpolatedPosition(
+        { lat: rec.lat, lon: rec.lon, gs: rec.deadReckonGs ?? rec.gs, track: rec.track }, elapsed,
+    );
+    const rawAltBaroFt = extrapolatedAltitude(
+        rec.alt_baro, rec.deadReckonBaroRate ?? rec.baro_rate, rec.nav_altitude_mcp, elapsed,
+    );
+
+    if (!prevDisplay) {
+        // Nothing to ease from yet, render directly. iconTrack defaults to 0 (north),
+        // not null/undefined, specifically so every later frame (which WILL have a
+        // prevDisplay) always finds a real number in prevDisplay.track below.
+        return { pos: target, altBaroFt: rawAltBaroFt, iconTrack: rec.track ?? 0 };
+    }
+
+    const pos = isBackwardCorrection(prevDisplay, target, rec.track)
+        ? prevDisplay   // hold -- never visibly fly backward (see isBackwardCorrection)
+        : smoothedPosition(prevDisplay, target, dtS, tauS);
+
+    const bearing = bearingDeg({ lat: prevDisplay.lat, lon: prevDisplay.lon }, pos);
+    // No movement this frame (held, or genuinely stationary) -- keep pointing the way
+    // it was already pointing rather than snapping to an arbitrary angle for a
+    // zero-length vector.
+    const rawIconTrack = bearing != null ? bearing : (prevDisplay.track ?? rec.track ?? 0);
+    // Always rate-capped (see MAX_ICON_TURN_RATE_DEG_S) once there's a PRIOR FRAME to
+    // ease from at all -- deliberately NOT gated on whether prevDisplay.track happens
+    // to already be a number. adsb.lol's `track` is null for essentially an entire
+    // ground phase in real captured data (ADS-B ground track is undefined/unbroadcast
+    // near-stationary, e.g. at the gate or early taxi) -- with the old "no prior
+    // number, skip smoothing" rule, an aircraft could sit at track=null (nothing to
+    // derive a bearing from either, no movement yet) for the whole taxi phase, then
+    // the FIRST real bearing/track reading once it finally starts moving -- exactly
+    // the noisy, unreliable one the original twitch fix targeted -- rendered
+    // instantly, fully unsmoothed, because that "first known" branch treated it as
+    // indistinguishable from a genuine first sighting. Caught live: an aircraft
+    // rendering "sideways" through its takeoff roll, straightening only once
+    // airborne. The no-prevDisplay branch above's real-number default (0, not null)
+    // guarantees this branch can never be bypassed again after the first frame.
+    const iconTrack = smoothedAngle(prevDisplay.track ?? 0, rawIconTrack, dtS, tauS, MAX_ICON_TURN_RATE_DEG_S);
+
+    // Altitude only eases when it's a genuine number -- 'ground'/unknown has nothing
+    // meaningful to ease toward or from, and popupHtml's on_ground/alt_baro_known
+    // already read the raw rec directly.
+    let altBaroFt = rawAltBaroFt;
+    if (typeof rawAltBaroFt === 'number') {
+        const prevAlt = typeof prevDisplay.alt === 'number'
+            ? prevDisplay.alt : rawAltBaroFt;   // no lag if altitude just became known
+        altBaroFt = smoothedScalar(prevAlt, rawAltBaroFt, dtS, tauS, MAX_ALT_CORRECTION_FPM / 60);
+    }
+
+    return { pos, altBaroFt, iconTrack };
+}
+
+// displayByHex/dtS/tauS (all optional) opt into deriveDisplayState's correction
+// smoothing: when displayByHex is given, each hex's previous displayed state is looked
+// up and handed to deriveDisplayState, then the result is written back so the NEXT call
+// eases from here. displayByHex=null (the default) means every prevDisplay is
+// undefined, so deriveDisplayState's no-prior-state branch runs for every record --
+// every pre-existing caller/test gets the exact raw dead-reckoned target, unchanged.
 export function buildFeatureCollection(aircraftByHex, now, displayByHex = null, dtS = 0, tauS = SMOOTH_TAU_S) {
     const features = [];
     for (const rec of aircraftByHex.values()) {
@@ -503,73 +570,13 @@ export function buildFeatureCollection(aircraftByHex, now, displayByHex = null, 
         const category = (rec.category || '').toUpperCase();
         if (category.startsWith('C')) continue;
         const elapsed = boundedElapsedSeconds(rec.receivedAt, now);
-        // deadReckonGs/deadReckonBaroRate (recordFromFeature) fall back to the raw
-        // gs/baro_rate for any caller/test that doesn't set them -- only recordFromFeature
-        // actually forces them to 0 (see its docstring for the stalled-position case).
-        const target = interpolatedPosition(
-            { lat: rec.lat, lon: rec.lon, gs: rec.deadReckonGs ?? rec.gs, track: rec.track }, elapsed,
-        );
-        const rawAltBaroFt = extrapolatedAltitude(
-            rec.alt_baro, rec.deadReckonBaroRate ?? rec.baro_rate, rec.nav_altitude_mcp, elapsed,
-        );
+        const prevDisplay = displayByHex ? displayByHex.get(rec.hex) : undefined;
+        const { pos, altBaroFt, iconTrack } = deriveDisplayState(rec, elapsed, prevDisplay, dtS, tauS);
 
-        let pos = target;
-        let altBaroFt = rawAltBaroFt;
-        let iconTrack = rec.track;
         if (displayByHex) {
-            const prevDisplay = displayByHex.get(rec.hex);
-            if (prevDisplay && isBackwardCorrection(prevDisplay, target, rec.track)) {
-                pos = prevDisplay;   // hold -- never visibly fly backward (see isBackwardCorrection)
-            } else {
-                pos = prevDisplay ? smoothedPosition(prevDisplay, target, dtS, tauS) : target;
-            }
-
-            if (prevDisplay) {
-                const bearing = bearingDeg({ lat: prevDisplay.lat, lon: prevDisplay.lon }, pos);
-                // No movement this frame (held, or genuinely stationary) -- keep
-                // pointing the way it was already pointing rather than snapping to
-                // an arbitrary angle for a zero-length vector.
-                const rawIconTrack = bearing != null ? bearing : (prevDisplay.track ?? rec.track ?? 0);
-                // Always rate-capped (see MAX_ICON_TURN_RATE_DEG_S) once there's a
-                // PRIOR FRAME to ease from at all -- deliberately NOT gated on whether
-                // prevDisplay.track happens to already be a number. adsb.lol's `track`
-                // is null for essentially an entire ground phase in real captured data
-                // (ADS-B ground track is undefined/unbroadcast near-stationary, e.g.
-                // at the gate or early taxi) -- with the old "no prior number, skip
-                // smoothing" rule, an aircraft could sit at track=null (nothing to
-                // derive a bearing from either, no movement yet) for the whole taxi
-                // phase, then the FIRST real bearing/track reading once it finally
-                // starts moving -- exactly the noisy, unreliable one the original
-                // twitch fix targeted -- rendered instantly, fully unsmoothed, because
-                // that "first known" branch treated it as indistinguishable from a
-                // genuine first sighting. Caught live: an aircraft rendering "sideways"
-                // through its takeoff roll, straightening only once airborne. Below,
-                // the true first-sighting default (0, not null) guarantees every
-                // subsequent frame always has a real prior to ease from, so this
-                // branch can never be bypassed again after the first frame.
-                iconTrack = smoothedAngle(prevDisplay.track ?? 0, rawIconTrack, dtS, tauS, MAX_ICON_TURN_RATE_DEG_S);
-            } else {
-                // Genuine first-ever sighting (no prevDisplay at all) -- nothing to
-                // ease from yet, render directly. Defaults to 0 (north), not null/
-                // undefined, specifically so every later frame (which WILL have a
-                // prevDisplay) always finds a real number in prevDisplay.track above.
-                iconTrack = rec.track ?? 0;
-            }
-
-            let smoothedAlt;
-            // Altitude only participates when it's a genuine number -- 'ground'/unknown
-            // has nothing meaningful to ease toward or from, and popupHtml's
-            // on_ground/alt_baro_known already read the raw rec directly.
-            if (typeof rawAltBaroFt === 'number') {
-                const prevAlt = prevDisplay && typeof prevDisplay.alt === 'number'
-                    ? prevDisplay.alt : rawAltBaroFt;   // no lag if altitude just became known
-                smoothedAlt = smoothedScalar(prevAlt, rawAltBaroFt, dtS, tauS, MAX_ALT_CORRECTION_FPM / 60);
-                altBaroFt = smoothedAlt;
-            }
-
             displayByHex.set(rec.hex, {
                 ...pos,
-                ...(smoothedAlt !== undefined ? { alt: smoothedAlt } : {}),
+                ...(typeof altBaroFt === 'number' ? { alt: altBaroFt } : {}),
                 track: iconTrack,
             });
         }

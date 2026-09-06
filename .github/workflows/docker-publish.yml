@@ -1,15 +1,15 @@
 name: Publish Docker Images to GHCR
 
-# Triggers the workflow when a pull request targeting master is closed, when a
-# vX.Y.Z release tag is pushed, or when you manually trigger it from the GitHub
-# Actions tab.
+# Triggers the workflow when a pull request targeting master is closed, when an
+# X.Y.Z release tag is pushed (no "v" prefix -- e.g. 2.0.0), or when you manually
+# trigger it from the GitHub Actions tab.
 on:
   pull_request:
     branches: [ "master" ]
     types: [ "closed" ]
   push:
     tags:
-      - 'v*.*.*'
+      - '*.*.*'
   workflow_dispatch:
 
 env:
@@ -36,7 +36,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # A tag push publishes a pinned, versioned image (e.g. :v1.2.0) instead of
+      # A tag push publishes a pinned, versioned image (e.g. :2.0.0) instead of
       # touching :latest -- :latest keeps tracking master merges as it always has,
       # release tags are a separate, deliberate "cut a release" action. `version` is
       # separate from `value` (the docker tag): it's baked into the app image itself

@@ -103,11 +103,52 @@ def _square_land(lon_min, lat_min, lon_max, lat_max):
 def test_coastline_land_mask_classifies_points_against_the_gshhg_union():
     land = _square_land(0.0, 0.0, 10.0, 10.0)
     mesh_lon, mesh_lat = np.meshgrid([-5.0, 5.0], [-5.0, 5.0])
+    # dilate=False: isolate the raw rasterize/classify step from the dilation
+    # post-process (covered separately below) -- on this 2x2 mesh the default dilation
+    # would spread the single land corner into its neighbours too.
     with patch("atmos_gl.lib.coastline._load_gshhg_land_union", return_value=land):
-        mask = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
+        mask = coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0, dilate=False
+        )
 
     # (5,5) is inside the square (land); the other three corners are outside (water).
     assert mask.tolist() == [[False, False], [False, True]]
+
+
+# ---- coastal-bleed fix: dilate=True (the default) grows the land mask -------------
+# See docs/adr/0014-dilate-sst-land-mask-for-linear-filtering-bleed.md. Used to be a
+# per-caller step (sst.py/currents.py/waves.py each ran their own identical
+# binary_dilation, and greenhouse_gases.py's caller was missed entirely) -- now lives
+# once, here, so every caller (present and future) gets it correctly by construction.
+
+def test_coastline_land_mask_dilates_by_default():
+    # Land square (5..15) contains only the value-10 mesh point on each axis, which
+    # lands at index [1,1] in this 4x4 mesh; dilation (8-connectivity) should grow
+    # that single True cell into its full immediate neighbourhood, but not reach the
+    # far corner two steps away.
+    land = _square_land(5.0, 5.0, 15.0, 15.0)
+    mesh_lon, mesh_lat = np.meshgrid([0.0, 10.0, 20.0, 30.0], [0.0, 10.0, 20.0, 30.0])
+    with patch("atmos_gl.lib.coastline._load_gshhg_land_union", return_value=land):
+        mask = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
+
+    assert mask[1, 1] == True  # noqa: E712 -- the original land cell
+    # Every neighbour (including diagonal) of [1,1] is grown to True.
+    assert mask[0, 0] == True and mask[0, 1] == True and mask[0, 2] == True  # noqa: E712
+    assert mask[1, 0] == True and mask[1, 2] == True  # noqa: E712
+    assert mask[2, 0] == True and mask[2, 1] == True and mask[2, 2] == True  # noqa: E712
+    assert mask[3, 3] == False  # noqa: E712 -- too far to be grown into
+
+
+def test_coastline_land_mask_dilate_false_skips_it():
+    land = _square_land(5.0, 5.0, 15.0, 15.0)
+    mesh_lon, mesh_lat = np.meshgrid([0.0, 10.0, 20.0, 30.0], [0.0, 10.0, 20.0, 30.0])
+    with patch("atmos_gl.lib.coastline._load_gshhg_land_union", return_value=land):
+        mask = coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0, dilate=False
+        )
+
+    assert mask[1, 1] == True  # noqa: E712
+    assert mask[0, 0] == False and mask[0, 1] == False and mask[1, 0] == False  # noqa: E712 -- NOT grown
 
 
 def test_coastline_land_mask_caches_the_union_per_bbox():

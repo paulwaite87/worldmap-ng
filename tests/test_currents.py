@@ -30,16 +30,12 @@ def test_init_wires_a_land_mask_cache_labelled_currents():
     assert u._land_mask._label == "Currents"
 
 
-# ---- coastal-bleed fix: land mask is dilated before masking u/v -------------------
-# See docs/adr/0014-dilate-sst-land-mask-for-linear-filtering-bleed.md -- the fill
-# shader's LINEAR-filtered alpha discard (and the particle engine's VEL_SAMPLE, same
-# pattern) blends across the true coastline edge, so the land cut must be dilated by
-# one cell before baking NaN into u/v or colour/motion bleeds onto land.
+# ---- land mask is applied as-is (dilation, if any, is LandMaskCache/ ------------
+# coastline_land_mask's own responsibility -- see tests/test_coastline.py's
+# "coastal-bleed fix" tests) -- this just confirms plot() cuts land straight from
+# whatever self._land_mask.get() returns, with no further processing of its own.
 
-def test_plot_dilates_land_mask_before_masking_uv():
-    # Column 2 is the "true" coastline mask; plot() dilates it by one cell before
-    # cutting, so column 1 is expected to come out NaN too even though the mock mask
-    # itself doesn't mark it as land.
+def test_plot_masks_land_cells_as_nan_from_the_land_mask_as_is():
     land = np.array([[False, False, True], [False, False, True], [False, False, True]])
     u_arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
     v_arr = u_arr.copy()
@@ -60,5 +56,5 @@ def test_plot_dilates_land_mask_before_masking_uv():
         u.plot(field0={"u": u_arr, "v": v_arr, "lat": None, "lon": None}, state=MagicMock(fhour=3))
 
     encoded_u = m_encode.call_args.args[0]
-    assert np.isnan(encoded_u[:, 1:]).all()
-    assert not np.isnan(encoded_u[:, 0]).any()
+    assert np.isnan(encoded_u[:, 2]).all()
+    assert not np.isnan(encoded_u[:, :2]).any()

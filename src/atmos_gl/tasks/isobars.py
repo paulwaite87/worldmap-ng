@@ -40,6 +40,10 @@ class IsobarUpdater(Updater, MultiHourRenderMixin):
         lats = clamp_lats_to_mercator_limit(field0["lat"])
         lons = field0["lon"]
         p = field0["values"]  # already smoothed from unpacker
+        # Isobars render straight from the native grid (no regrid_for_lod call here),
+        # so the antimeridian seam has to be closed directly -- see
+        # close_lon_seam_for_contour's docstring for why contour() needs this at all.
+        lons, p = self.close_lon_seam_for_contour(lons, p)
 
         plot = Plot(self.map_data.region)
         plot.get_figure()
@@ -167,6 +171,22 @@ class IsobarUpdater(Updater, MultiHourRenderMixin):
         except Exception as e:
             logger.warning(f"Failed to write isobar labels {out_path}: {e}")
 
+    def _render_settings_signature(self) -> str:
+        """Render-relevant settings for should_plot_for_hour's staleness check
+        (mirrors SSTUpdater._mode_settings_signature). Isobars bakes all of these
+        directly into the per-hour PNG/labels in plot() above, so a change to any of
+        them must invalidate an already-cached hour even though neither the source
+        data nor the output file's mtime changed on its own."""
+        return self._settings_signature(
+            {
+                "isobar_step": self.settings.get("isobar_step", 4),
+                "isobar_color": self.settings.get("isobar_color", "white"),
+                "linewidth": self.settings.get("linewidth", 1.0),
+                "label_fontsize": self.settings.get("label_fontsize", 10),
+                "opacity": self.settings.get("opacity", 100),
+            }
+        )
+
     def run(self, max_hours=None):
         # Warms the shared per-cycle GFS baseline cache (map_data.shared_state) for
         # other updaters this cycle; render_all_hours resolves its own state from the
@@ -181,4 +201,5 @@ class IsobarUpdater(Updater, MultiHourRenderMixin):
             plot_fn=self.plot,
             field_ready=lambda f: f.get("values") is not None,
             max_hours=max_hours,
+            settings_sig=self._render_settings_signature(),
         )

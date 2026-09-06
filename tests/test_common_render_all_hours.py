@@ -245,6 +245,69 @@ def test_skips_hours_before_now_fhour_respects_max_hours():
     assert seen_hours == [6]  # the first reachable hour, not 0
 
 
+def test_settings_sig_is_forwarded_to_should_plot_for_hour_when_given():
+    """render_all_hours must thread settings_sig through to every should_plot_for_hour
+    call -- both the initial per-hour check and the post-plot recheck -- otherwise a
+    settings-only change (the isobars linewidth bug) is invisible to the mixin."""
+    u = make_bare_layer(hours_resolved=("2026-06-13", "18", [3]))
+    should_plot, mark_done = _pending_then_done()
+    u.should_plot_for_hour = MagicMock(
+        side_effect=lambda state, product, **kw: should_plot(state, product)
+    )
+    u.get_db_field_at_hour = MagicMock(return_value={"values": [[1.0]]})
+    u._write_render_signature = MagicMock()
+    plot_fn = MagicMock(side_effect=mark_done)
+
+    u.render_all_hours("isobars", plot_fn, field_ready=lambda f: True, settings_sig="sig-a")
+
+    assert u.should_plot_for_hour.call_args_list
+    for call in u.should_plot_for_hour.call_args_list:
+        assert call.kwargs.get("settings_sig") == "sig-a"
+
+
+def test_no_settings_sig_kwarg_when_none_given():
+    """Callers that don't pass settings_sig (every pre-existing caller) must keep
+    calling should_plot_for_hour with its original two positional args -- no
+    settings_sig kwarg at all -- so mocks/subclasses written against that shape are
+    unaffected."""
+    u = make_bare_layer()
+    u.should_plot_for_hour = MagicMock(return_value=False)
+    plot_fn = MagicMock()
+
+    u.render_all_hours("isobars", plot_fn, field_ready=lambda f: True)
+
+    for call in u.should_plot_for_hour.call_args_list:
+        assert call.kwargs == {}
+
+
+def test_writes_settings_signature_sidecar_after_successful_plot():
+    u = make_bare_layer(hours_resolved=("2026-06-13", "18", [3]))
+    should_plot, mark_done = _pending_then_done()
+    u.should_plot_for_hour = MagicMock(
+        side_effect=lambda state, product, **kw: should_plot(state, product)
+    )
+    u.get_db_field_at_hour = MagicMock(return_value={"values": [[1.0]]})
+    u._write_render_signature = MagicMock()
+    plot_fn = MagicMock(side_effect=mark_done)
+
+    u.render_all_hours("isobars", plot_fn, field_ready=lambda f: True, settings_sig="sig-a")
+
+    u._write_render_signature.assert_called_once_with(u.get_output_path_for_hour(3), "sig-a")
+
+
+def test_does_not_write_signature_sidecar_when_no_settings_sig_given():
+    u = make_bare_layer(hours_resolved=("2026-06-13", "18", [3]))
+    should_plot, mark_done = _pending_then_done()
+    u.should_plot_for_hour = MagicMock(side_effect=should_plot)
+    u.get_db_field_at_hour = MagicMock(return_value={"values": [[1.0]]})
+    u._write_render_signature = MagicMock()
+    plot_fn = MagicMock(side_effect=mark_done)
+
+    u.render_all_hours("isobars", plot_fn, field_ready=lambda f: True)
+
+    u._write_render_signature.assert_not_called()
+
+
 def test_no_instance_state_is_mutated():
     """The whole point of full thread-through: render_all_hours must not read or write
     self.run_date_str/run_id/forecast_hour_str at all."""

@@ -76,10 +76,16 @@ class WindUpdater(Updater, MultiHourRenderMixin):
             plot = Plot(self.map_data.region)
             plot.get_figure()
             norm = mcolors.Normalize(vmin=0.0, vmax=self.VMAX_SPEED)
+            # Closes the antimeridian seam for this static render only -- see
+            # close_lon_seam_for_contour's docstring. regrid_for_lod's own new_lons/
+            # spd_smooth stay untouched for any other use (there is none here: the
+            # velocity texture below is encoded via encode_uv from field0's native
+            # u/v grids, not this LOD-regridded one).
+            contour_lons, contour_spd = self.close_lon_seam_for_contour(new_lons, spd_smooth)
             plot.ax.contourf(
-                new_lons,
+                contour_lons,
                 clamp_lats_to_mercator_limit(new_lats),
-                spd_smooth,
+                contour_spd,
                 levels=20,
                 cmap=WIND_CMAP,
                 norm=norm,

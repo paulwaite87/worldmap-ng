@@ -30,7 +30,9 @@ from atmos_gl.round_robin_order import RoundRobinOrder
 def test_multi_hour_and_single_shot_sections_partition_task_classes():
     assert set(MULTI_HOUR_SECTIONS) | set(SINGLE_SHOT_SECTIONS) == set(TASK_CLASSES)
     assert set(MULTI_HOUR_SECTIONS).isdisjoint(SINGLE_SHOT_SECTIONS)
-    assert set(SINGLE_SHOT_SECTIONS) == {"sst", "clouds", "markers", "greenhouse_gases", "air_quality"}
+    assert set(SINGLE_SHOT_SECTIONS) == {
+        "sst", "clouds", "markers", "greenhouse_gases", "air_quality", "flood_risk",
+    }
     assert set(MULTI_HOUR_SECTIONS) == {
         "isobars", "precipitation", "wind", "currents", "jetstream", "waves",
         "temperature", "ozone", "stormwatch", "pwat", "fires",

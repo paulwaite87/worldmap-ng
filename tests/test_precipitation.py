@@ -60,3 +60,35 @@ def test_apply_meaningful_floor_returns_all_zero_when_no_core_exists():
     result = u._apply_meaningful_floor(arr)
 
     assert (result == 0.0).all()
+
+
+def make_settings_sig_updater(settings=None):
+    u = PrecipitationUpdater.__new__(PrecipitationUpdater)
+    u.settings = settings or {}
+    return u
+
+
+def test_render_settings_signature_changes_for_each_render_relevant_setting():
+    """Bug: min_mm_hr/opacity/palette are baked directly into the static per-hour PNG
+    (plot()'s min_rate/alpha/palette_name), but should_plot_for_hour used to compare
+    only the output file's mtime against the DATA's updated_at -- a settings-only edit
+    touched neither, so an already-cached hour was never re-rendered with the new
+    value. _render_settings_signature (wired into SingleHourScalarUpdater.run() via
+    render_all_hours' settings_sig) closes that gap; this locks its reaction to each
+    setting it covers."""
+    base = {"min_mm_hr": 0.1, "opacity": 50, "palette": "standard"}
+    base_sig = make_settings_sig_updater(dict(base))._render_settings_signature()
+    for key, changed in (
+        ("min_mm_hr", 1.0),
+        ("opacity", 80),
+        ("palette", "ocean_blue"),
+    ):
+        variant = dict(base)
+        variant[key] = changed
+        variant_sig = make_settings_sig_updater(variant)._render_settings_signature()
+        assert variant_sig != base_sig, f"{key} change did not alter the signature"
+
+
+def test_render_settings_signature_stable_for_identical_settings():
+    u = make_settings_sig_updater({"min_mm_hr": 0.5, "opacity": 60, "palette": "high_contrast"})
+    assert u._render_settings_signature() == u._render_settings_signature()

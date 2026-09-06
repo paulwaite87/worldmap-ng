@@ -72,6 +72,22 @@ describe('hoverPopup', () => {
         expect(popup.addTo).toHaveBeenCalledWith(map);
     });
 
+    test('mouseenter on a non-Point feature (e.g. a Troublespots polygon) anchors the popup to the mouse position, not the geometry', () => {
+        const map = fakeMap();
+        const html = vi.fn(() => '<div/>');
+        hoverPopup(map, 'troublespots-fill', { html });
+
+        const feature = {
+            properties: { band: 'severe' },
+            geometry: { type: 'Polygon', coordinates: [[[1, 2], [3, 4], [5, 6], [1, 2]]] },
+        };
+        map._handlers['mouseenter:troublespots-fill']({ features: [feature], lngLat: [9, 10] });
+
+        const popup = globalThis.maplibregl.Popup.mock.results[0].value;
+        expect(popup.setLngLat).toHaveBeenCalledWith([9, 10]);
+        expect(popup.addTo).toHaveBeenCalledWith(map);
+    });
+
     test('mouseenter with no features is a no-op', () => {
         const map = fakeMap();
         const html = vi.fn();

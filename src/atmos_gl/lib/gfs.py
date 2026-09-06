@@ -183,9 +183,14 @@ def download_byte_ranges(url, ranges, timeout=120):
     return bytes(out)
 
 
-def download_whole(url, timeout=120):
-    """Download an entire file and return its bytes (for products like the wave GRIB)."""
-    r = requests.get(url, timeout=timeout, stream=True)
+def download_whole(url, timeout=120, headers=None):
+    """Download an entire file and return its bytes (for products like the wave GRIB).
+
+    `headers` (e.g. a browser User-Agent) is passed through unchanged to requests.get
+    for a source that WAF-blocks the default python-requests UA -- see
+    ensure_gumbel_fit_cached (lib/flood_risk.py), confirmed live against ETH's
+    research-collection host, which 403s a bare non-browser UA."""
+    r = requests.get(url, timeout=timeout, stream=True, headers=headers)
     r.raise_for_status()
     out = bytearray()
     for chunk in r.iter_content(chunk_size=1024 * 1024):

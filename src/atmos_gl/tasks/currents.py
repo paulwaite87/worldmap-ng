@@ -3,7 +3,6 @@ import os
 import logging
 
 import numpy as np
-from scipy.ndimage import binary_dilation
 
 from atmos_gl.lib.config import AtmosGLConfig
 from atmos_gl.lib.texture import encode_uv
@@ -80,18 +79,13 @@ class CurrentsUpdater(VectorFieldUpdater):
             v[below] = np.nan
 
         # (2) Coastline cut: remove ocean values that the regrid smeared onto land.
-        # Dilate 1 cell (8-connectivity, covering diagonal-only coastal corners) before
-        # cutting: both consumers of this texture -- the fill shader (createFillLayer's
-        # LINEAR-filtered u_tex0/u_tex1, hard alpha>=0.5 discard) and the particle
-        # engine's VEL_SAMPLE (same LINEAR-tap-then-threshold pattern) -- blend alpha
-        # AND colour/velocity across every texel boundary, including the true
-        # coastline edge. A sample landing more than half-way toward the (alpha=255)
-        # ocean side survives the discard with bleed-through colour/motion even on the
-        # land side of the real coastline. Same fix, same reasoning, as SST's land
-        # mask (see docs/adr/0014-dilate-sst-land-mask-for-linear-filtering-bleed.md).
+        # LandMaskCache.get() (-> coastline_land_mask()) already dilates the mask by one
+        # cell before returning it (see that function's own docstring) -- needed because
+        # both consumers of this texture, the fill shader's LINEAR-filtered discard and
+        # the particle engine's VEL_SAMPLE, blend colour/velocity across the true
+        # coastline edge otherwise.
         land = self._land_mask.get(new_lats, new_lons, u.shape)
         if land is not None and land.shape == u.shape:
-            land = binary_dilation(land, structure=np.ones((3, 3), dtype=bool))
             u[land] = np.nan
             v[land] = np.nan
 

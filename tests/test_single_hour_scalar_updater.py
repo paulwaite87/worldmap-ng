@@ -66,6 +66,24 @@ def test_run_dispatches_render_all_hours_with_status_product_plot_and_max_hours(
     assert kwargs["field_ready"]({"values": None}) is False
 
 
+def test_render_settings_signature_defaults_to_none():
+    """The base class bakes nothing settings-derived into pixels itself (that's
+    entirely per-subclass, e.g. PrecipitationUpdater's min_mm_hr/opacity/palette) --
+    None keeps should_plot_for_hour's old data-only freshness check for any subclass
+    that doesn't override this."""
+    u = _StubUpdater()
+    assert u._render_settings_signature() is None
+
+
+def test_run_forwards_render_settings_signature_to_render_all_hours():
+    u = make_stub()
+
+    u.run(max_hours=1)
+
+    kwargs = u.render_all_hours.call_args.kwargs
+    assert kwargs["settings_sig"] is None
+
+
 def test_run_returns_render_all_hours_result():
     u = make_stub()
     u.render_all_hours.return_value = "sentinel"

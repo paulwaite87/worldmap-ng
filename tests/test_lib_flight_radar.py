@@ -227,6 +227,33 @@ async def test_fetch_routes_confirmed_no_match_is_none_not_missing():
 
 
 @pytest.mark.asyncio
+async def test_fetch_routes_skips_a_bare_null_entry_in_the_response_list():
+    """Confirmed live: adsb.lol's routeset response can include a bare `null` entry
+    alongside real ones -- entry.get(...) on it raised AttributeError and crashed
+    route enrichment entirely (not just that one callsign). A null entry must be
+    skipped, not misread as "every callsign in this batch has no route" and not
+    allowed to crash the whole call."""
+    body = [None, {"callsign": "N12345", "_airports": [{"icao": "NZAA"}, {"icao": "NZQN"}]}]
+    session = _FakeSession(_FakeResponse(200, body))
+    result = await fetch_routes(
+        session,
+        [
+            {"callsign": "UNKNOWN1", "lat": 0.0, "lng": 0.0},
+            {"callsign": "N12345", "lat": 0.0, "lng": 0.0},
+        ],
+    )
+    assert result == {
+        "N12345": {
+            "stops": [
+                {"icao": "NZAA", "iata": None, "name": None},
+                {"icao": "NZQN", "iata": None, "name": None},
+            ],
+            "plausible": None,
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_fetch_routes_returns_none_for_the_whole_batch_on_a_non_200_status():
     """Distinct from a per-callsign no-match: a rejected/failed BATCH request must
     never be misread as "every callsign in it has no route"."""

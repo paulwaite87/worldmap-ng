@@ -23,6 +23,16 @@ class SingleHourScalarUpdater(Updater, MultiHourRenderMixin):
         self.per_hour_outputs = [".png", "_data.png"]
         self.status_product = product
 
+    def _render_settings_signature(self) -> str | None:
+        """Optional signature of this layer's render-relevant settings, forwarded to
+        render_all_hours' settings_sig -- see should_plot_for_hour's docstring. None
+        (the default) means this layer's already-cached hours never go stale purely
+        from a settings edit, so the old data-only freshness check is all it needs.
+        Override to return an actual Updater._settings_signature() when a subclass
+        bakes config directly into the rendered pixels (e.g. PrecipitationUpdater's
+        min_mm_hr/opacity/palette)."""
+        return None
+
     def run(self, max_hours=None):
         # Warms the shared per-cycle GFS baseline cache (map_data.shared_state) for
         # other updaters this cycle; render_all_hours resolves its own state from the
@@ -37,6 +47,7 @@ class SingleHourScalarUpdater(Updater, MultiHourRenderMixin):
             plot_fn=self.plot,
             field_ready=lambda f: f.get("values") is not None,
             max_hours=max_hours,
+            settings_sig=self._render_settings_signature(),
         )
 
     def plot(self, field0, state):

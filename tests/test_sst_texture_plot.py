@@ -106,10 +106,9 @@ def test_plot_anomaly_encodes_with_the_fixed_physical_domain_not_the_calculated_
 
 
 def test_plot_masks_land_cells_as_nan_before_encoding():
-    # Column 2 is the "true" coastline mask; plot() dilates it by one cell before
-    # cutting (see plot()'s comment -- keeps the GPU's LINEAR-filtered alpha blend
-    # from bleeding colour onto land at the coast), so column 1 is expected to come
-    # out NaN too even though the mock mask itself doesn't mark it as land.
+    # plot() cuts land straight from coastline_land_mask()'s own return value -- the
+    # LINEAR-filter dilation fix now lives inside coastline_land_mask() itself (see
+    # tests/test_coastline.py), not here, so this mock mask is used as-is.
     land = np.array([[False, False, True], [False, False, True], [False, False, True]])
     u = make_bare_updater(settings={})
     with _StackedMocks(mock_land=land) as mocks:
@@ -117,8 +116,8 @@ def test_plot_masks_land_cells_as_nan_before_encoding():
         u.plot("absolute", "/tmp/fake.nc", "/data/sst_absolute.png")
 
         encoded_frame = mocks["encode_frames"].call_args.args[0][0]
-        assert np.isnan(encoded_frame[:, 1:]).all()
-        assert not np.isnan(encoded_frame[:, 0]).any()
+        assert np.isnan(encoded_frame[:, 2]).all()
+        assert not np.isnan(encoded_frame[:, :2]).any()
 
 
 def test_mode_settings_signature_is_empty_since_nothing_affects_the_encoded_texture():

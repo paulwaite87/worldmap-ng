@@ -157,6 +157,14 @@ async def fetch_routes(
 
     results: dict[str, dict | None] = {}
     for entry in data or []:
+        if not entry:
+            # adsb.lol's routeset response can include a bare `null` entry alongside
+            # real ones (confirmed live: AttributeError: 'NoneType' object has no
+            # attribute 'get' crashing route enrichment) -- distinct from a callsign
+            # simply being absent from the response (this function's own docstring),
+            # so skip it rather than raise; the caller's filter_stale retries whatever
+            # callsign it represented on a later cycle.
+            continue
         callsign = entry.get("callsign")
         if not callsign:
             continue

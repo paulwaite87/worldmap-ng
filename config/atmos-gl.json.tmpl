@@ -152,6 +152,12 @@
     "ch4_palette": "vivid",
     "runs_per_day": 24
   },
+  "flood_risk": {
+    "enabled": false,
+    "mode": "live",
+    "opacity": 60,
+    "runs_per_day": 24
+  },
   "storms": {
     "enabled": false,
     "expiry_days": 4,
@@ -192,6 +198,25 @@
     "opacity": 70,
     "min_risk_display": 25,
     "min_risk_filter": 0
+  },
+  "world_events": {
+    "enabled": false,
+    "opacity": 80,
+    "marker_size": 1.0,
+    "expiry_days": 7,
+    "min_mentions": 10,
+    "backfill_days": 3,
+    "show_explosion": true,
+    "show_warfare": true,
+    "show_targeted_violence": true,
+    "show_diplomacy": true,
+    "runs_per_day": 96
+  },
+  "troublespots": {
+    "enabled": false,
+    "opacity": 80,
+    "cell_size_deg": 2.0,
+    "window_hours": 48
   },
   "air_quality": {
     "enabled": false,
@@ -257,6 +282,7 @@
       "gvp": "https://volcano.si.edu/news/WeeklyVolcanoRSS.xml",
       "hans": "https://volcanoes.usgs.gov/hans-public/api/volcano/getElevatedVolcanoes",
       "fires": "https://firms.modaps.eosdis.nasa.gov/api/area/csv",
+      "world_events": "http://data.gdeltproject.org/gdeltv2",
       "satellites": "https://celestrak.org/NORAD/elements",
       "shipping": "wss://stream.aisstream.io/v0/stream",
       "lightning": "https://demo.openweathermap.org/lightning/1.0/data",
@@ -272,9 +298,12 @@
       "ghg_forecast": true,
       "ghg_egg4_baseline": true,
       "air_quality": true,
+      "flood_risk_live": true,
+      "flood_risk_historical": true,
       "quakes": true,
       "volcanoes": true,
       "fires": true,
+      "world_events": true,
       "satellites": true,
       "storms": true
     },

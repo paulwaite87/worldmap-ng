@@ -144,21 +144,19 @@
 
                         <div class="grouping-box">
                             <h5>Climate</h5>
-                            <p class="text-muted small mb-3">Select a climate base layer to render across the globe:</p>
                             <div class="row g-3">
-                                <div class="col-md-3"><div class="form-check"><input class="form-check-input" type="radio" name="exclusive_climate" id="radio__sst"><label class="form-check-label fw-bold ms-1" for="radio__sst">Sea Surface Temp</label></div></div>
-                                <div class="col-md-3"><div class="form-check"><input class="form-check-input" type="radio" name="exclusive_climate" id="radio__currents"><label class="form-check-label fw-bold ms-1" for="radio__currents">Ocean Currents</label></div></div>
-                                <div class="col-md-3"><div class="form-check"><input class="form-check-input" type="radio" name="exclusive_climate" id="radio__temperature"><label class="form-check-label fw-bold ms-1" for="radio__temperature">Air Temperature</label></div></div>
-                                <div class="col-md-3"><div class="form-check"><input class="form-check-input" type="radio" name="exclusive_climate" id="radio__ozone"><label class="form-check-label fw-bold ms-1" for="radio__ozone">Ozone</label></div></div>
-                                <div class="col-md-3"><div class="form-check"><input class="form-check-input" type="radio" name="exclusive_climate" id="radio__stormwatch"><label class="form-check-label fw-bold ms-1" for="radio__stormwatch">Storm Watch</label></div></div>
-                                <div class="col-md-3">
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="radio" name="exclusive_climate" id="radio__greenhouse_gases">
-                                        <label class="form-check-label fw-bold ms-1" for="radio__greenhouse_gases">Greenhouse Gases</label>
+                                <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="sst__enabled"><label class="form-check-label fw-bold ms-2">Sea Surface Temp</label></div></div>
+                                <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="currents__enabled"><label class="form-check-label fw-bold ms-2">Ocean Currents</label></div></div>
+                                <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="temperature__enabled"><label class="form-check-label fw-bold ms-2">Air Temperature</label></div></div>
+                                <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="ozone__enabled"><label class="form-check-label fw-bold ms-2">Ozone</label></div></div>
+                                <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="stormwatch__enabled"><label class="form-check-label fw-bold ms-2">Storm Watch</label></div></div>
+                                <div class="col-md-4">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="greenhouse_gases__enabled">
+                                        <label class="form-check-label fw-bold ms-2">Greenhouse Gases</label>
                                         <div id="key-warn-cdsapi" class="text-danger small mt-1 d-none">⚠️ Deactivated: Missing CDSAPI_KEY.</div>
                                     </div>
                                 </div>
-                                <div class="col-12 mt-2"><button type="button" class="btn btn-sm btn-outline-danger" onclick="clearClimateRadio()">None / Disable Climate Base Layer</button></div>
                             </div>
                         </div>
 
@@ -168,11 +166,20 @@
                                 <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="quakes__enabled"><label class="form-check-label fw-bold ms-2">Earthquakes</label></div></div>
                                 <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="volcanoes__enabled"><label class="form-check-label fw-bold ms-2">Volcanoes</label></div></div>
                                 <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="fires__enabled"><label class="form-check-label fw-bold ms-2">Wildfires</label></div></div>
+                                <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="world_events__enabled"><label class="form-check-label fw-bold ms-2">World Events</label></div></div>
+                                <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="troublespots__enabled"><label class="form-check-label fw-bold ms-2">Troublespots</label></div></div>
                                 <div class="col-md-6">
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" id="air_quality__enabled">
                                         <label class="form-check-label fw-bold ms-2">Air Quality</label>
                                         <div id="key-warn-cdsapi-aq" class="text-danger small mt-1 d-none">⚠️ Deactivated: Missing CDSAPI_KEY.</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="flood_risk__enabled">
+                                        <label class="form-check-label fw-bold ms-2">Flood Risk</label>
+                                        <div id="key-warn-glofas" class="text-danger small mt-1 d-none">⚠️ Deactivated: Missing EARTHDATA_TOKEN (needed for Live mode -- switch to Historical instead).</div>
                                     </div>
                                 </div>
                             </div>
@@ -194,7 +201,7 @@
 
                     <div class="tab-pane fade" id="weather-pane"><div id="container-weather">{{ field_macros.render_tab_group(["clouds", "isobars", "wind", "jetstream", "precipitation", "pwat", "lightning", "storms", "waves"], config_data) }}</div></div>
                     <div class="tab-pane fade" id="climate-pane"><div id="container-climate">{{ field_macros.render_tab_group(["sst", "currents", "temperature", "ozone", "stormwatch", "greenhouse_gases"], config_data) }}</div></div>
-                    <div class="tab-pane fade" id="events-pane"><div id="container-events">{{ field_macros.render_tab_group(["quakes", "volcanoes", "fires", "air_quality"], config_data) }}</div></div>
+                    <div class="tab-pane fade" id="events-pane"><div id="container-events">{{ field_macros.render_tab_group(["quakes", "volcanoes", "fires", "world_events", "troublespots", "air_quality", "flood_risk"], config_data) }}</div></div>
                     <div class="tab-pane fade" id="misc-pane"><div id="container-misc">{{ field_macros.render_tab_group(["satellites", "terminator", "markers", "flightradar", "landmass", "shipping"], config_data) }}</div></div>
                     <div class="tab-pane fade" id="background-pane">
                         <div class="grouping-box">
@@ -358,7 +365,7 @@
         });
 
         function parseExplicitElements(data) {
-            ['clouds', 'isobars', 'wind', 'jetstream', 'precipitation', 'pwat', 'lightning', 'storms', 'waves', 'quakes', 'volcanoes', 'fires', 'air_quality', 'satellites', 'shipping', 'terminator', 'markers', 'flightradar', 'landmass'].forEach(layer => {
+            ['clouds', 'isobars', 'wind', 'jetstream', 'precipitation', 'pwat', 'lightning', 'storms', 'waves', 'quakes', 'volcanoes', 'fires', 'world_events', 'troublespots', 'air_quality', 'flood_risk', 'satellites', 'shipping', 'terminator', 'markers', 'flightradar', 'landmass', 'sst', 'currents', 'temperature', 'ozone', 'stormwatch', 'greenhouse_gases'].forEach(layer => {
                 const el = document.getElementById(`${layer}__enabled`);
                 if (el && data[layer]) {
                     el.checked = !!data[layer].enabled;
@@ -366,17 +373,9 @@
                 }
             });
 
-            ['sst', 'currents', 'temperature', "ozone", "stormwatch", "greenhouse_gases"].forEach(layer => {
-                const el = document.getElementById(`radio__${layer}`);
-                if (el) {
-                    el.addEventListener('change', toggleSectionVisibility);
-                    if (data[layer] && data[layer].enabled) el.checked = true;
-                }
-            });
-
-            const ghgRadio = document.getElementById('radio__greenhouse_gases');
-            if (ghgRadio && data.greenhouse_gases && data.greenhouse_gases.RULE__missing_cdsapi_key) {
-                ghgRadio.disabled = true; ghgRadio.checked = false;
+            const ghgEnabled = document.getElementById('greenhouse_gases__enabled');
+            if (ghgEnabled && data.greenhouse_gases && data.greenhouse_gases.RULE__missing_cdsapi_key) {
+                ghgEnabled.disabled = true; ghgEnabled.checked = false;
                 document.getElementById('key-warn-cdsapi').classList.remove('d-none');
             }
 
@@ -384,6 +383,16 @@
             if (aqEnabled && data.air_quality && data.air_quality.RULE__missing_cdsapi_key) {
                 aqEnabled.disabled = true; aqEnabled.checked = false;
                 document.getElementById('key-warn-cdsapi-aq').classList.remove('d-none');
+            }
+
+            // Mode-specific gate (unlike the always-on cdsapi checks above): Historical
+            // mode needs no credential at all, so this only fires when RULE__missing_
+            // earthdata_token was actually set server-side, i.e. the stored mode is
+            // "live" and EARTHDATA_TOKEN is absent (see routes/config.py's _build_config_data).
+            const floodRiskEnabled = document.getElementById('flood_risk__enabled');
+            if (floodRiskEnabled && data.flood_risk && data.flood_risk.RULE__missing_earthdata_token) {
+                floodRiskEnabled.disabled = true; floodRiskEnabled.checked = false;
+                document.getElementById('key-warn-glofas').classList.remove('d-none');
             }
 
             const aisEnabled = document.getElementById('shipping_collector__enabled');
@@ -427,9 +436,7 @@
         // one of shipping/lightning/flightradar's own kill-switch) -- see the grilled
         // design. The checkbox's checked state is left exactly as saved; only its
         // `disabled` attribute and an explanatory note are added, so re-enabling
-        // collection makes it work again with no re-toggle needed. Section names
-        // double as both `{section}__enabled` checkbox ids and, for the Climate
-        // group's mutually-exclusive layers, `radio__{section}` ids.
+        // collection makes it work again with no re-toggle needed.
         async function applyLayerAvailability() {
             let availability = {};
             try {
@@ -443,7 +450,7 @@
 
             for (const [section, info] of Object.entries(availability)) {
                 if (info.collecting) continue;
-                const el = document.getElementById(`${section}__enabled`) || document.getElementById(`radio__${section}`);
+                const el = document.getElementById(`${section}__enabled`);
                 if (!el) continue;
                 el.disabled = true;
                 const wrap = el.closest('.form-check');
@@ -454,11 +461,6 @@
                     wrap.appendChild(note);
                 }
             }
-        }
-
-        function clearClimateRadio() {
-            document.getElementsByName('exclusive_climate').forEach(r => r.checked = false);
-            toggleSectionVisibility();
         }
 
         function toggleSectionVisibility() {
@@ -475,19 +477,22 @@
                 "quakes": document.getElementById('quakes__enabled')?.checked,
                 "volcanoes": document.getElementById('volcanoes__enabled')?.checked,
                 "fires": document.getElementById('fires__enabled')?.checked,
+                "world_events": document.getElementById('world_events__enabled')?.checked,
+                "troublespots": document.getElementById('troublespots__enabled')?.checked,
                 "air_quality": document.getElementById('air_quality__enabled')?.checked,
+                "flood_risk": document.getElementById('flood_risk__enabled')?.checked,
                 "satellites": document.getElementById('satellites__enabled')?.checked,
                 "terminator": document.getElementById('terminator__enabled')?.checked,
                 "markers": document.getElementById('markers__enabled')?.checked,
                 "flightradar": document.getElementById('flightradar__enabled')?.checked,
                 "landmass": document.getElementById('landmass__enabled')?.checked,
                 "shipping": document.getElementById('shipping__enabled')?.checked,
-                "sst": document.getElementById('radio__sst')?.checked,
-                "currents": document.getElementById('radio__currents')?.checked,
-                "temperature": document.getElementById('radio__temperature')?.checked,
-                "ozone": document.getElementById('radio__ozone')?.checked,
-                "stormwatch": document.getElementById('radio__stormwatch')?.checked,
-                "greenhouse_gases": document.getElementById('radio__greenhouse_gases')?.checked,
+                "sst": document.getElementById('sst__enabled')?.checked,
+                "currents": document.getElementById('currents__enabled')?.checked,
+                "temperature": document.getElementById('temperature__enabled')?.checked,
+                "ozone": document.getElementById('ozone__enabled')?.checked,
+                "stormwatch": document.getElementById('stormwatch__enabled')?.checked,
+                "greenhouse_gases": document.getElementById('greenhouse_gases__enabled')?.checked,
                 "shipping_collector": document.getElementById('shipping_collector__enabled')?.checked,
                 "lightning_collector": document.getElementById('lightning_collector__enabled')?.checked,
                 "satellites_collector": document.getElementById('satellites_collector__enabled')?.checked,
@@ -526,16 +531,9 @@
 
             const payload = JSON.parse(JSON.stringify(masterConfigCache));
 
-            ['clouds', 'isobars', 'wind', 'jetstream', 'precipitation', 'pwat', 'lightning', 'storms', 'waves', 'quakes', 'volcanoes', 'fires', 'air_quality', 'satellites', 'terminator', 'markers', 'flightradar', 'landmass', 'shipping', 'shipping_collector', 'lightning_collector', 'satellites_collector', 'data_collector'].forEach(layer => {
+            ['clouds', 'isobars', 'wind', 'jetstream', 'precipitation', 'pwat', 'lightning', 'storms', 'waves', 'quakes', 'volcanoes', 'fires', 'world_events', 'troublespots', 'air_quality', 'flood_risk', 'satellites', 'terminator', 'markers', 'flightradar', 'landmass', 'shipping', 'shipping_collector', 'lightning_collector', 'satellites_collector', 'data_collector', 'sst', 'currents', 'temperature', 'ozone', 'stormwatch', 'greenhouse_gases'].forEach(layer => {
                 if (payload[layer]) payload[layer].enabled = document.getElementById(`${layer}__enabled`)?.checked || false;
             });
-
-            if(payload.sst) payload.sst.enabled = document.getElementById('radio__sst').checked;
-            if(payload.currents) payload.currents.enabled = document.getElementById('radio__currents').checked;
-            if(payload.temperature) payload.temperature.enabled = document.getElementById('radio__temperature').checked;
-            if(payload.ozone) payload.ozone.enabled = document.getElementById('radio__ozone').checked;
-            if(payload.stormwatch) payload.stormwatch.enabled = document.getElementById('radio__stormwatch').checked;
-            if(payload.greenhouse_gases) payload.greenhouse_gases.enabled = document.getElementById('radio__greenhouse_gases').checked;
 
             document.querySelectorAll(".dynamic-input").forEach(input => {
                 const [section, option] = input.id.split('__');

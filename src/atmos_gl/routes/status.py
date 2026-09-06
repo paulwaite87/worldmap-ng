@@ -50,7 +50,7 @@ def _display_name(key: str) -> str:
 # with real percent/next_update math already derived from the shared cadence.
 RUNS_PER_DAY_SECTIONS = {
     "quakes", "volcanoes", "storms", "fires", "markers", "sst",
-    "clouds", "satellites_collector",
+    "clouds", "satellites_collector", "world_events", "air_quality",
 }
 
 
@@ -295,10 +295,21 @@ def get_data_status(
         # returning both facts from this one closure (see cadence_of's docstring) is
         # what lets the frontend stop re-deriving that special case itself. Falls back
         # to 96 (matching CollectorService.refresh_settings's own default), not None.
+        #
+        # flood_risk_live is the other special case here: FieldCollectorDriver has no
+        # is_stale() cadence check of its own (see FloodRiskLiveCollector.collect()'s
+        # own comment), so flood_risk.runs_per_day was configured but had no
+        # operator-facing control anywhere until now. Surfaced only on this row, not
+        # flood_risk_historical -- that row already respects the same shared
+        # "flood_risk" section via its own EventFeedDriver-based is_stale() check, and
+        # isn't in RUNS_PER_DAY_SECTIONS, so it deliberately shows no duplicate widget.
         def _field_collector_cadence(cls):
-            if getattr(cls, "status_name", None) != "gfs_atmos":
-                return None, None
-            return config.get_setting("data_collector", "runs_per_day", 96), "data_collector"
+            status_name = getattr(cls, "status_name", None)
+            if status_name == "gfs_atmos":
+                return config.get_setting("data_collector", "runs_per_day", 96), "data_collector"
+            if status_name == "flood_risk_live":
+                return config.get_setting("flood_risk", "runs_per_day", 24), "flood_risk"
+            return None, None
 
         collectors = _collect_status_rows(
             (*collector_classes, *cache_collector_classes),

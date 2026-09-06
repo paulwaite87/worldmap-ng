@@ -108,9 +108,32 @@ describe('viewBox', () => {
         expect(lonMax).toBeGreaterThan(0.5);
     });
 
-    test('enforces a minimum box height when getBounds() N/S span collapses (high zoom)', () => {
+    test('enforces a minimum box height when getBounds() N/S span collapses to near-zero', () => {
         const [, yN, , yS] = viewBox(mockMap({ north: 5.0001, south: 5.0, zoom: 12 }));
-        expect(yS - yN).toBeGreaterThanOrEqual(0.006 - 1e-9);
+        expect(yS - yN).toBeGreaterThanOrEqual(1e-6 - 1e-9);
+    });
+
+    test('shrinks the respawn box to track a normal viewport all the way through high zoom, instead of freezing around zoom 10', () => {
+        // Regression for the "hardly any particles active past zoom ~10" bug: the old
+        // floors (MIN_H=0.006 UV / spanLon>=1deg) were sized as a "reasonable minimum
+        // useful size" rather than a true degenerate-input guard, so a normal ~1024px
+        // viewport's genuinely-shrinking span got clamped back UP to that size well
+        // before MapLibre's own ~22 zoom ceiling -- freezing the respawn box's size
+        // while the actual visible viewport kept shrinking underneath it, so an
+        // ever-growing fraction of respawns landed off-screen. getBounds()'s own N/S
+        // report already shrinks correctly with zoom (mirrors real MapLibre behaviour;
+        // unlike longitude, this function doesn't re-derive it from pixel width), so a
+        // realistic tiny span here must NOT get pulled back up to the old ~1deg floor.
+        const zoom10 = viewBox(mockMap({ north: 0.05, south: -0.05, lng: 0, zoom: 10 }));
+        const zoom18 = viewBox(mockMap({ north: 0.0002, south: -0.0002, lng: 0, zoom: 18 }));
+        const lonSpan = ([lonMin, , lonMax]) => lonMax - lonMin;
+        const latSpan = ([, yN, , yS]) => yS - yN;
+        expect(lonSpan(zoom18)).toBeLessThan(lonSpan(zoom10));
+        expect(latSpan(zoom18)).toBeLessThan(latSpan(zoom10));
+        // Both must be a tiny sliver of the globe, nowhere near the old ~1deg (~0.0028
+        // of the 0..1 longitude fraction) floor that used to cap them.
+        expect(lonSpan(zoom10)).toBeLessThan(0.0028);
+        expect(lonSpan(zoom18)).toBeLessThan(0.0001);
     });
 
     test('falls back to the whole world when the derived longitude span is degenerate/huge', () => {

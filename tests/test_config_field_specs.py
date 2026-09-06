@@ -646,25 +646,22 @@ def test_validate_against_specs_now_validates_enabled_as_a_boolean():
     assert "clouds.enabled" in errors[0]
 
 
-@pytest.mark.parametrize("section", ["clouds", "shipping", "shipping_collector"])
+@pytest.mark.parametrize("section", [
+    "clouds", "shipping", "shipping_collector",
+    "sst", "currents", "temperature", "ozone", "stormwatch", "greenhouse_gases",
+])
 def test_config_page_still_renders_each_enabled_checkbox_exactly_once(section):
     """Regression guard: now that these sections have a FIELD_SPECS entry for
     `enabled`, render_field_group's existing exclusion (_field_macros.html) must still
-    keep it out of the generic properties-tab rendering, so the Show/Background tab's
-    own hardcoded checkbox remains the only one -- no duplicate id in the page."""
+    keep it out of the generic properties-tab rendering, so the Show tab's own
+    hardcoded checkbox remains the only one -- no duplicate id in the page. Climate
+    sections (sst/currents/.../greenhouse_gases) used to render as a mutually-exclusive
+    radio group (`radio__{section}`) instead -- since independent Climate layers can now
+    be shown together, they're plain `{section}__enabled` checkboxes like every other
+    section."""
     resp = client.get("/config")
     html = resp.text
     assert html.count(f'id="{section}__enabled"') == 1
-
-
-def test_config_page_still_renders_each_climate_radio_exactly_once():
-    """Same regression guard as above, for the climate tab's radio-exclusivity group
-    -- sst.enabled now has a FIELD_SPECS entry too, but must still render only via the
-    Show tab's radio__sst input, not also inline in the Climate properties tab."""
-    resp = client.get("/config")
-    html = resp.text
-    assert html.count('id="radio__sst"') == 1
-    assert 'id="sst__enabled"' not in html
 
 
 def test_config_page_renders_housekeeper_enabled_as_a_visible_toggle():
@@ -945,3 +942,45 @@ def test_config_page_renders_landmass_fields_section_and_gated_fallback():
     assert 'id="landmass__color"' in html
     assert 'id="landmass__halo_color"' in html
     assert 'id="landmass__linewidth"' in html
+
+
+# --- Flood Risk (issue #371) ---
+
+
+def test_config_page_renders_flood_risk_toggle_on_show_tab():
+    resp = client.get("/config")
+    html = resp.text
+    assert 'type="checkbox" id="flood_risk__enabled"' in html
+
+
+def test_config_page_renders_flood_risk_fields_section_and_gated_fallback():
+    resp = client.get("/config")
+    html = resp.text
+    assert 'id="fields-section-flood_risk"' in html
+    assert 'id="fallback-section-flood_risk"' in html
+    assert 'id="flood_risk__mode"' in html
+    assert 'id="flood_risk__opacity"' in html
+
+
+def test_config_page_renders_flood_risk_mode_select_with_both_options():
+    resp = client.get("/config")
+    html = resp.text
+    idx = html.index('id="flood_risk__mode"')
+    select_html = html[idx : html.index("</select>", idx)]
+    assert '<option value="live"' in select_html
+    assert '<option value="historical"' in select_html
+
+
+def test_config_page_renders_glofas_warning_markup_for_the_flood_risk_gate():
+    """Locks that the admin page has the key-warn-glofas element the JS in
+    config.html looks for (`data.flood_risk.RULE__missing_earthdata_token` ->
+    classList.remove('d-none')) -- the gate itself (mode-specific, only Live mode
+    needs EARTHDATA_TOKEN) is exercised at the /api/config data layer by
+    test_flood_risk_config_gate.py; this just confirms the page has somewhere to
+    surface that flag. Element id kept as "key-warn-glofas" (not renamed) even
+    though the credential itself changed -- see collectors/flood_risk.py's module
+    docstring for Live mode's data-source pivot away from GloFAS."""
+    resp = client.get("/config")
+    html = resp.text
+    assert 'id="key-warn-glofas"' in html
+    assert "RULE__missing_earthdata_token" in html

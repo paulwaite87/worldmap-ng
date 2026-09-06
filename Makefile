@@ -27,20 +27,12 @@ endif
 stop:
 	docker compose down
 
-## bootstrap-config: Ensure live config/atmos-gl.json, .env, and docker-compose.override.yml exist (never overwrites any if already there)
+## bootstrap-config: Ensure live config/atmos-gl.json, .env, and docker-compose.override.yml exist, and keep atmos-gl.json's shape synced with its template (adds template keys you're missing, drops keys the template no longer defines, never touches the value of anything already there)
+# Shared with Makefile.prod via scripts/bootstrap-config.sh (--with-override adds the
+# dev-only docker-compose.override.yml step prod has no equivalent of) -- see that
+# script's own comment for why this used to live separately in each Makefile.
 bootstrap-config:
-	@if [ ! -f config/atmos-gl.json ]; then \
-		cp config/atmos-gl.json.tmpl config/atmos-gl.json; \
-		echo "Created config/atmos-gl.json from config/atmos-gl.json.tmpl"; \
-	fi
-	@if [ ! -f .env ]; then \
-		cp .env.tmpl .env; \
-		echo "Created .env from .env.tmpl -- edit this to add your API keys"; \
-	fi
-	@if [ ! -f docker-compose.override.yml ]; then \
-		cp docker-compose.override.yml.tmpl docker-compose.override.yml; \
-		echo "Created docker-compose.override.yml from docker-compose.override.yml.tmpl"; \
-	fi
+	@bash scripts/bootstrap-config.sh --with-override
 
 ## start|run|up: Start dev stack (auto-merges docker-compose.override.yml)
 up run start: bootstrap-config
@@ -65,11 +57,7 @@ prod-down:
 
 ## logs: Tail all logs; service=name for specific service
 logs:
-ifndef service
-	docker compose logs -f
-else
-	docker compose logs -f ${service}
-endif
+	@bash scripts/logs.sh $(service)
 
 ## test: Run all tests (optional: make test include=pattern)
 test:
@@ -111,28 +99,11 @@ lint-fix: lint-format
 
 ## backup: Backup database to local atmos_gl_dump.sql file
 backup:
-	@echo "Ensuring atmos_gl database is running"
-	docker compose up $(DB_SERVICE) -d
-	@echo "Creating compressed database backup to $(DUMP_FILE)..."
-	docker compose exec $(DB_SERVICE) pg_dump -U $(DB_USER) -Fc $(DB_NAME) > $(DUMP_FILE)
-	@echo "Backup complete."
+	@DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) DUMP_FILE=$(DUMP_FILE) bash scripts/backup.sh
 
 ## restore: Restores the local atmos_gl_dump.sql backup
 restore:
-	@echo "WARNING: This will DELETE and RECREATE the $(DB_NAME) database from $(DUMP_FILE)."
-	@if [ ! -f $(DUMP_FILE) ]; then echo "Error: $(DUMP_FILE) not found."; exit 1; fi
-	@read -p "Are you sure? [y/N] " ans; \
-	if [ "$${ans:-N}" = "y" ] || [ "$${ans:-N}" = "Y" ]; then \
-		echo "Stopping backend services" ; \
-		docker compose stop $(BACKEND_SERVICES); \
-		echo "Ensuring atmos_gl database is running..." ; \
-		docker compose up $(DB_SERVICE) -d && sleep 5 ; \
-		echo "Restoring database..." ; \
-		cat $(DUMP_FILE) | docker compose exec -T $(DB_SERVICE) pg_restore -U $(DB_USER) -d postgres --clean --create --if-exists ; \
-		echo "Restore complete." ; \
-		echo "Stopping atmos_gl database. Backend left as stopped." ; \
-		docker compose stop $(DB_SERVICE) ; \
-	fi
+	@DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) DUMP_FILE=$(DUMP_FILE) BACKEND_SERVICES="$(BACKEND_SERVICES)" bash scripts/restore.sh
 
 ## clean: Stop containers, remove images
 clean:
@@ -150,9 +121,7 @@ purge:
 
 ## psql: Open psql session in map database
 psql:
-	@echo "Ensuring atmos_gl database is running"
-	@docker compose up $(DB_SERVICE) -d
-	@docker compose exec $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME)
+	@DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) bash scripts/psql.sh
 
 ## migrate: Apply alembic migrations to the local dev database (via uv, outside Docker)
 migrate:
@@ -162,27 +131,7 @@ migrate:
 
 ## status: Database Status Report
 status:
-	@echo "--- Ships Located in Each Region ---"
-	@docker compose exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT r.label as region, count(s.mmsi) as ships \
-	 FROM map_region r \
-	 LEFT JOIN ships s ON ST_Within(s.geom, r.boundary) \
-	 GROUP BY r.label \
-	 ORDER BY ships DESC;"
-	@echo "\n--- Database Composition (Unique Ships) ---"
-	@docker compose exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT \
-	    count(*) FILTER (WHERE name != 'Unknown' AND vessel_type != 0) as full_records, \
-	    count(*) FILTER (WHERE name = 'Unknown' AND vessel_type = 0) as shadow_records, \
-	    count(*) as total \
-	 FROM ships;"
-	@echo "--- Lightning Strikes in Each Region ---"
-	@docker compose exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT r.label as region, count(l.id) as strikes \
-	 FROM map_region r \
-	 LEFT JOIN lightning_strikes l ON ST_Within(l.geom, r.boundary) \
-	 GROUP BY r.label \
-	 ORDER BY strikes DESC;"
+	@BUILDER_SERVICE=$(BUILDER_SERVICE) bash scripts/status.sh
 
 ## help: Show this help menu
 help:

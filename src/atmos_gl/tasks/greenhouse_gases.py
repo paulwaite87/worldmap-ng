@@ -93,6 +93,10 @@ class GhgUpdater(Updater):
             display_data, lat_raw, lon_norm, fill_value=np.nan, step_override=_REGRID_STEP_DEG,
         )
         mesh_lon, mesh_lat = np.meshgrid(new_lons, new_lats)
+        # coastline_land_mask() dilates the mask by one cell before returning (see its
+        # own docstring) -- needed because this renders through the same GPU fill
+        # layer's LINEAR-filtered alpha discard SST does, and would otherwise show the
+        # same coastal colour bleed SST had before docs/adr/0014.
         land = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
         if land is not None and land.shape == display_data.shape:
             display_data[land] = np.nan

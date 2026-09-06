@@ -179,3 +179,33 @@ def test_regrid_for_lod_custom_fill_value_outside_domain():
     updater2 = make_bare_updater(level_of_detail=1)
     _, _, smooth_zero = updater2.regrid_for_lod(field, lats, lons, fill_value=0)
     assert not np.isnan(smooth_zero).any()  # fill_value=0 -- no NaNs anywhere
+
+
+# close_lon_seam_for_contour: the fix for the visible antimeridian seam in the
+# isobars/precipitation/wind/scalar_field static renders (contour()/contourf() has no
+# concept of a periodic domain, so a global grid's last and first lon columns -- though
+# geographically adjacent -- are treated as the two dead-end edges of a plain
+# rectangular grid unless a duplicate wrap column closes the loop first).
+def test_close_lon_seam_for_contour_appends_a_duplicate_wrap_column_for_a_global_grid():
+    updater = make_bare_updater()
+    lons = np.arange(-180.0, 180.0, 0.25)  # native GFS-style span: -180..179.75
+    field = np.tile(lons, (3, 1))  # field[:, j] == lons[j], so the wrap column is easy to check
+
+    new_lons, new_field = updater.close_lon_seam_for_contour(lons, field)
+
+    assert new_lons[-1] == 180.0
+    assert new_field.shape == (3, len(lons) + 1)
+    # The appended column is a duplicate of the first (lon=-180 and lon=180 are the
+    # same meridian) -- this is exactly what closes the seam for contour/contourf.
+    assert np.array_equal(new_field[:, -1], new_field[:, 0])
+
+
+def test_close_lon_seam_for_contour_leaves_a_regional_grid_unchanged():
+    updater = make_bare_updater()
+    lons = np.arange(170.0, 180.0, 0.25)  # a real regional span, well under a full globe
+    field = np.tile(lons, (3, 1))
+
+    new_lons, new_field = updater.close_lon_seam_for_contour(lons, field)
+
+    assert np.array_equal(new_lons, lons)
+    assert np.array_equal(new_field, field)

@@ -33,11 +33,12 @@
         }
         .basemap-picker__select:disabled { opacity: 0.5; }
 
-        /* Top-right toolbar: authWidget + settingsBtn share one flex row anchored by
+        /* Top-right toolbar: settingsBtn + authWidget share one flex row anchored by
            the wrapper, rather than each being independently right-offset -- two
            magic-number offsets left no reserved space for either one's actual
            rendered width, so a wide enough settingsBtn could overlap authWidget's
-           rightmost child regardless of what was in it. */
+           rightmost child regardless of what was in it. DOM order is left-to-right
+           visual order: settingsBtn, then authWidget. */
         #topRightBar {
             position: absolute;
             top: 20px;
@@ -163,10 +164,48 @@
             font-size: 11px;
             color: rgba(255, 255, 255, 0.4);
         }
-        #zoomDisplay {
+        /* Zoom control (trackpad-without-a-mouse aid): two stacked buttons matching
+           settingsBtn/auth-menu__toggle's chrome, sat next to the zoom readout in
+           #bottomLeftBar. */
+        #zoomControl {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .zoom-control__btn {
+            width: 36px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: none;
+            font-family: sans-serif;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s;
+            padding: 0;
+        }
+        .zoom-control__btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .zoom-control__btn + .zoom-control__btn {
+            border-top: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        #bottomLeftBar {
             position: absolute;
             bottom: 20px;
             left: 20px;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #zoomDisplay {
             background: rgba(0, 0, 0, 0.6);
             color: white;
             padding: 5px 10px;
@@ -174,7 +213,6 @@
             font-family: sans-serif;
             font-size: 12px;
             pointer-events: none;
-            z-index: 100;
         }
         #legend-stack {
             position: absolute;
@@ -230,8 +268,8 @@
         initLegendToggle();
     </script>
     <div id="topRightBar">
-        <div id="authWidget"></div>
         <a href="/config" id="settingsBtn" target="_blank">Configuration Control</a>
+        <div id="authWidget"></div>
     </div>
     <script type="module">
         // Independent of the main map bootstrap below -- #authWidget/#settingsBtn exist
@@ -240,7 +278,13 @@
         initAuthWidget();
     </script>
     <div id="basemap-picker-host"></div>
-    <div id="zoomDisplay"></div>
+    <div id="bottomLeftBar">
+        <div id="zoomControl">
+            <button type="button" id="zoomInBtn" class="zoom-control__btn" title="Zoom in">+</button>
+            <button type="button" id="zoomOutBtn" class="zoom-control__btn" title="Zoom out">&minus;</button>
+        </div>
+        <div id="zoomDisplay"></div>
+    </div>
 
     <div id="globeViz"></div>
 
@@ -303,12 +347,18 @@
                 map.on('zoom', updateZoom);
                 map.on('load', updateZoom);
 
+                // Zoom control buttons (#bottomLeftBar's zoomControl) -- a trackpad-without-
+                // a-mouse aid; the "up to whole degrees" zoom step comes from map.zoomIn/
+                // zoomOut's own default (+/-1) rather than a hand-picked delta here.
+                document.getElementById('zoomInBtn')?.addEventListener('click', () => map.zoomIn());
+                document.getElementById('zoomOutBtn')?.addEventListener('click', () => map.zoomOut());
+
                 // ---- Layer mounting + teardown registry (HOISTED) -------------------
                 const ALL_LAYERS = [
                     'sst', 'currents', 'waves', 'ozone', 'temperature', 'pwat', 'clouds',
                     'terminator', 'precipitation', 'stormwatch', 'wind', 'jetstream', 'isobars',
-                    'quakes', 'volcanoes', 'fires', 'lightning', 'storms', 'shipping', 'satellites',
-                    'markers', 'flightradar', 'greenhouse_gases', 'air_quality', 'landmass'
+                    'quakes', 'volcanoes', 'fires', 'world_events', 'troublespots', 'lightning', 'storms', 'shipping', 'satellites',
+                    'markers', 'flightradar', 'greenhouse_gases', 'air_quality', 'flood_risk', 'landmass'
                 ];
                 let layerCleanups = [];
                 let layersMounted = false;

@@ -4,7 +4,7 @@ import logging
 import gc
 import numpy as np
 import xarray as xr
-from scipy.ndimage import binary_dilation, distance_transform_edt
+from scipy.ndimage import distance_transform_edt
 
 # Internal imports
 from atmos_gl.lib.config import AtmosGLConfig
@@ -104,27 +104,12 @@ class SSTUpdater(Updater):
         new_lats = new_lats[::-1]
         display_data = display_data[::-1, :]
         mesh_lon, mesh_lat = np.meshgrid(new_lons, new_lats)
+        # coastline_land_mask() dilates the mask by one cell before returning (see its
+        # own docstring) -- needed because the GPU fill layer samples this texture with
+        # LINEAR filtering and a hard alpha>=0.5 discard, which would otherwise blend
+        # colour across the true coastline edge onto land.
         land = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
         if land is not None and land.shape == display_data.shape:
-            # Dilate 1 cell before cutting: the GPU fill layer samples this texture
-            # with LINEAR filtering and a hard alpha>=0.5 discard (ui/modules/
-            # _webglfill.js), which linearly blends alpha AND colour across every
-            # texel boundary -- including the true coastline edge. A pixel that
-            # blends more than half-way toward the (alpha=255) ocean side survives
-            # the discard with bleed-through colour, even though it sits on the
-            # land side of the real coastline -- confirmed live (99.9% mask/pixel
-            # agreement pre-fix, with the mismatch concentrated exactly at
-            # coastlines). Growing the NaN boundary by one cell (~1 texel, the
-            # LINEAR blend's maximum span) pushes it far enough offshore that the
-            # blend zone never crosses back onto land, at the cost of one texel's
-            # width of true coastal water going uncoloured too. Full 8-connectivity
-            # (not scipy's default 4-connectivity cross) -- bilinear bleeds across a
-            # 2x2 texel neighbourhood, including the diagonal, so a land cell only
-            # diagonally touching open ocean needs dilating too; confirmed live
-            # against the rendered texture that 4-connectivity alone missed exactly
-            # this case (a residual ~0.002% of land cells still showing colour,
-            # all at diagonal-only coast corners).
-            land = binary_dilation(land, structure=np.ones((3, 3), dtype=bool))
             display_data[land] = np.nan
 
         if mode == "anomaly":

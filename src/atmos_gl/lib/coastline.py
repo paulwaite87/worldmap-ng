@@ -14,7 +14,7 @@ import zipfile
 from io import BytesIO
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_dilation, distance_transform_edt
 
 logger = logging.getLogger(__name__)
 
@@ -174,16 +174,37 @@ def _rasterize_land_mask(land_geom, mesh_lon, mesh_lat):
     return mask.astype(bool)
 
 
-def coastline_land_mask(mesh_lon, mesh_lat, lon_min, lat_min, lon_max, lat_max):
+def coastline_land_mask(
+    mesh_lon, mesh_lat, lon_min, lat_min, lon_max, lat_max, dilate: bool = True
+):
     """Boolean land mask (True over land) sampled at the given mesh, cut from true
     GSHHG 'h' coastline geometry (see docs/adr/0013).
 
-    Shared by any layer that needs to remove land from an ocean field (currents, sst):
-    a data-derived NaN mask only knows where the model lacked data, so model values can
-    smear up to the interpolation cap onto the coast; cutting against real coastline
-    polygons clips the field to the actual shoreline. Returns None if the geometry can't
-    be loaded (e.g. no network for the one-time GSHHG download) so callers can fall back
-    to whatever data-derived mask they have.
+    Shared by any layer that needs to remove land from an ocean field (currents, sst,
+    waves, greenhouse_gases): a data-derived NaN mask only knows where the model lacked
+    data, so model values can smear up to the interpolation cap onto the coast; cutting
+    against real coastline polygons clips the field to the actual shoreline. Returns
+    None if the geometry can't be loaded (e.g. no network for the one-time GSHHG
+    download) so callers can fall back to whatever data-derived mask they have.
+
+    dilate=True (the default) grows the land boundary by one cell (8-connectivity, so
+    diagonal-only coastal corners are covered too) before returning. Every current
+    caller feeds this mask into a LINEAR-filtered GPU texture with a hard alpha>=0.5
+    discard (createFillLayer/createStaticFillLayer, ui/modules/_webglfill.js), which
+    blends colour/velocity across every texel boundary -- including the true coastline
+    edge -- so a sample landing more than half-way toward the (alpha=255) ocean side
+    survives the discard with bleed-through colour even on the land side of the real
+    coastline (confirmed live: 99.9% mask/pixel agreement pre-fix, with the mismatch
+    concentrated exactly at coastlines; see docs/adr/0014). Growing the mask by ~1 texel
+    pushes the boundary far enough offshore that this blend zone never crosses back onto
+    land, at the cost of one texel's width of true coastal water going uncoloured too.
+    Pass dilate=False for a caller that wants the raw geometric classification instead
+    (e.g. a non-GPU consumer, or a test isolating rasterization from this post-process).
+
+    This used to be a per-caller step (sst.py, currents.py, waves.py each ran their own
+    identical binary_dilation, and greenhouse_gases.py's own caller was missed entirely
+    -- see docs/adr/0014's "Revisit if" clause, which only anticipated currents/waves)
+    -- now every caller gets it correctly, by construction, for free.
     """
     try:
         key = (
@@ -205,7 +226,10 @@ def coastline_land_mask(mesh_lon, mesh_lat, lon_min, lat_min, lon_max, lat_max):
                 land_geom = land_geom.intersection(box(lon_min, lat_min, lon_max, lat_max))
             _COAST_GEOM_CACHE[key] = land_geom
 
-        return _rasterize_land_mask(land_geom, mesh_lon, mesh_lat)
+        mask = _rasterize_land_mask(land_geom, mesh_lon, mesh_lat)
+        if dilate:
+            mask = binary_dilation(mask, structure=np.ones((3, 3), dtype=bool))
+        return mask
     except Exception as exc:  # network/data/parse failure -> graceful fallback
         logger.warning(
             f"Coastline geometry unavailable ({exc!r}); land mask skipped."

@@ -85,6 +85,14 @@ const TITLE_VARIANTS = {
     alert: { color: '#ff4a4a', size: 14 },    // storms / lightning / quakes
     plain: { color: '#000', size: 14 },       // markers -- bold, no accent colour
     fire: { color: '#ff5a1f', size: 13 },     // fires -- distinct orange, not alert's red
+    // world_events -- one variant per category (not a single shared variant), keyed by
+    // the same string the backend stores as `category` (world_events.js passes it
+    // straight through as the variant name), so each category's popup title matches its
+    // marker color exactly.
+    explosion: { color: '#ff8c00', size: 13 },
+    warfare: { color: '#a30000', size: 13 },
+    targeted_violence: { color: '#3a0d0d', size: 13 },
+    diplomacy: { color: '#1f6feb', size: 13 },
 };
 
 const LABEL_COLOR = '#666';

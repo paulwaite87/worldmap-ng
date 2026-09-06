@@ -580,6 +580,49 @@ def test_data_status_attaches_runs_per_day_for_a_migrated_section(client, tmp_pa
     assert resp.json()["data"]["collectors"][0]["runs_per_day"] == 12
 
 
+def test_data_status_attaches_runs_per_day_for_world_events(client, tmp_path, monkeypatch):
+    """world_events has a real runs_per_day config value but had no operator-facing
+    control anywhere (not this page, not a Settings-tab field) until it was added to
+    RUNS_PER_DAY_SECTIONS."""
+    _override_all_empty()
+
+    class _FakeWorldEvents(_StubCollector):
+        section = "world_events"
+
+        def data_status(self):
+            return {**super().data_status(), "name": "world_events"}
+
+    app.dependency_overrides[get_collector_classes] = lambda: (_FakeWorldEvents,)
+    config_path = _write_runs_per_day_config(tmp_path, world_events={"runs_per_day": 24})
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+
+    resp = client.get("/api/data_status")
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["collectors"][0]["runs_per_day"] == 24
+
+
+def test_data_status_attaches_runs_per_day_for_air_quality(client, tmp_path, monkeypatch):
+    """Same gap as world_events -- air_quality's runs_per_day was configured but
+    unreachable from any UI until it was added to RUNS_PER_DAY_SECTIONS."""
+    _override_all_empty()
+
+    class _FakeAirQuality(_StubCollector):
+        section = "air_quality"
+
+        def data_status(self):
+            return {**super().data_status(), "name": "air_quality"}
+
+    app.dependency_overrides[get_cache_collector_classes] = lambda: (_FakeAirQuality,)
+    config_path = _write_runs_per_day_config(tmp_path, air_quality={"runs_per_day": 24})
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+
+    resp = client.get("/api/data_status")
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["collectors"][0]["runs_per_day"] == 24
+
+
 def test_data_status_defaults_runs_per_day_to_1_when_key_absent_from_config(
     client, tmp_path, monkeypatch
 ):
@@ -660,6 +703,42 @@ def test_data_status_attaches_data_collectors_runs_per_day_only_to_gfs_atmos_row
     # gfs_atmos's cadence saves under "data_collector", not "gfs_atmos" -- the frontend
     # reads this straight off the row instead of re-deriving the special case itself.
     assert sections == {"gfs_atmos": "data_collector", "gfs_waves": None}
+
+
+def test_data_status_attaches_flood_risk_runs_per_day_only_to_live_row(
+    client, tmp_path, monkeypatch
+):
+    """flood_risk_live and flood_risk_historical share flood_risk.runs_per_day (via
+    settings_section), but only the live row surfaces the cadence widget --
+    flood_risk_historical already respects it via its own EventFeedDriver-based
+    is_stale() and isn't in RUNS_PER_DAY_SECTIONS, so it deliberately shows none."""
+    _override_all_empty()
+
+    class _FakeFloodRiskLive(_StubCollector):
+        status_name = "flood_risk_live"
+
+        def data_status(self):
+            return {**super().data_status(), "name": "flood_risk_live"}
+
+    class _FakeGfsWaves(_StubCollector):
+        status_name = "gfs_waves"
+
+        def data_status(self):
+            return {**super().data_status(), "name": "gfs_waves"}
+
+    app.dependency_overrides[get_field_collector_classes] = lambda: (
+        _FakeFloodRiskLive, _FakeGfsWaves,
+    )
+    config_path = _write_runs_per_day_config(tmp_path, flood_risk={"runs_per_day": 12})
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+
+    resp = client.get("/api/data_status")
+
+    assert resp.status_code == 200
+    collectors = {c["name"]: c["runs_per_day"] for c in resp.json()["data"]["collectors"]}
+    assert collectors == {"flood_risk_live": 12, "gfs_waves": None}
+    sections = {c["name"]: c["runs_per_day_section"] for c in resp.json()["data"]["collectors"]}
+    assert sections == {"flood_risk_live": "flood_risk", "gfs_waves": None}
 
 
 def test_data_status_attaches_greenhouse_gases_runs_per_day_only_to_forecast_row(

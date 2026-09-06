@@ -3,7 +3,7 @@
 // for 1 hour = 60 nautical miles = exactly 1 degree of latitude), not recomputed the
 // way the code does, so a broken formula can actually disagree with the test.
 import { describe, test, expect } from 'vitest';
-import { interpolatedPosition, smoothedPosition, smoothedScalar, smoothedAngle, isBackwardCorrection, bearingDeg, recordFromFeature, extrapolatedAltitude, boundedElapsedSeconds, isFrozen, flightStatus, targetAltitudeLabel, aircraftClass, aircraftGroup, aircraftGroupColor, airlineForFlight, stopCode, routePathHtml, plausibleWarningHtml, parseRouteStops, buildFeatureCollection } from './flightradar.js';
+import { interpolatedPosition, smoothedPosition, smoothedScalar, smoothedAngle, isBackwardCorrection, bearingDeg, recordFromFeature, extrapolatedAltitude, boundedElapsedSeconds, isFrozen, flightStatus, targetAltitudeLabel, aircraftClass, aircraftGroup, aircraftGroupColor, airlineForFlight, stopCode, routePathHtml, plausibleWarningHtml, parseRouteStops, deriveDisplayState, buildFeatureCollection } from './flightradar.js';
 
 describe('interpolatedPosition', () => {
     test('due-north flight for 1 hour at 60kts moves exactly 1 degree of latitude', () => {
@@ -641,11 +641,11 @@ describe('buildFeatureCollection baro_rate_fpm fallback', () => {
 
 // Correction smoothing (issue: aircraft icons visibly snapping backward when a new
 // real sample's position falls behind where constant-velocity dead reckoning had
-// already extrapolated to -- see interpolatedPosition/smoothedPosition). displayByHex
-// is optional and defaults to null so every pre-existing call site/test above (which
-// never passes it) keeps getting the exact raw dead-reckoned target, unsmoothed --
-// this is opt-in, not a behaviour change for callers that don't ask for it.
-describe('buildFeatureCollection position smoothing', () => {
+// already extrapolated to -- see interpolatedPosition/smoothedPosition).
+// prevDisplay=undefined (no prior displayed state) skips easing entirely -- this is
+// what buildFeatureCollection's displayByHex=null default (see the wiring tests below)
+// reduces to for every record.
+describe('deriveDisplayState', () => {
     // gs=3600kt is unrealistic but keeps the numbers clean the same way the existing
     // interpolatedPosition tests do (60kt for 1hr = 1 degree) while staying under
     // MAX_EXTRAPOLATION_S's 60s cap: 3600kt for 60s covers the same 60nm distance.
@@ -660,47 +660,33 @@ describe('buildFeatureCollection position smoothing', () => {
         };
     }
 
-    // receivedAt=1000ms; now = 1000ms + 60s (in ms) -> elapsed = exactly 60s (right at,
-    // not past, the cap), so a 3600kt due-north flight moves exactly 1 degree of
-    // latitude.
-    const NOW_AFTER_60S = 1000 + 60 * 1000;
+    // A 3600kt due-north flight covers exactly 1 degree of latitude in 60s.
+    const ELAPSED_60S = 60;
 
-    test('omitting displayByHex renders the raw dead-reckoned target, unsmoothed (backward compatible)', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S);
-        expect(fc.features[0].geometry.coordinates).toEqual([0, 1]);
-    });
-
-    test('the first time an aircraft is seen, there is no prior display position to ease from -- renders the raw target directly', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
-        const displayByHex = new Map();
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 1.0, 0.6);
-        expect(fc.features[0].geometry.coordinates).toEqual([0, 1]);
+    test('no prior display state (a genuine first sighting) renders the raw dead-reckoned target directly', () => {
+        const state = deriveDisplayState(movingRec(), ELAPSED_60S, undefined, 1.0, 0.6);
+        expect(state.pos).toEqual({ lat: 1, lon: 0 });
         // No prior display to compute a rendered bearing from -- falls back to the
         // raw reported track (movingRec's default, 0).
-        expect(displayByHex.get('a1b2c3')).toEqual({ lat: 1, lon: 0, track: 0 });
+        expect(state.iconTrack).toBe(0);
     });
 
     test('an existing display position eases toward the new target rather than snapping to it', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
-        const displayByHex = new Map([['a1b2c3', { lat: 0.2, lon: 0 }]]);
         const dtS = 0.6, tauS = 0.6;
         const target = interpolatedPosition({ lat: 0, lon: 0, gs: 3600, track: 0 }, 60);
-        const expected = smoothedPosition({ lat: 0.2, lon: 0 }, target, dtS, tauS);
+        const expectedPos = smoothedPosition({ lat: 0.2, lon: 0 }, target, dtS, tauS);
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, dtS, tauS);
+        const state = deriveDisplayState(movingRec(), ELAPSED_60S, { lat: 0.2, lon: 0 }, dtS, tauS);
 
-        expect(fc.features[0].geometry.coordinates).toEqual([expected.lon, expected.lat]);
+        expect(state.pos).toEqual(expectedPos);
         // The eased position must land strictly between the old display and the raw
         // target -- neither still at the old spot nor snapped straight to the target.
-        expect(fc.features[0].geometry.coordinates[1]).toBeGreaterThan(0.2);
-        expect(fc.features[0].geometry.coordinates[1]).toBeLessThan(1.0);
-        // displayByHex is updated in place so the next frame eases from here, not from
-        // the stale 0.2 starting point.
+        expect(state.pos.lat).toBeGreaterThan(0.2);
+        expect(state.pos.lat).toBeLessThan(1.0);
         // The rendered movement was due north the whole time (lon stays 0), so the
-        // derived icon_track/stored bearing is 0 -- matches raw track here since
-        // nothing diverged, but derived independently via bearingDeg, not copied.
-        expect(displayByHex.get('a1b2c3')).toEqual({ ...expected, track: 0 });
+        // derived icon_track is 0 -- matches raw track here since nothing diverged,
+        // but derived independently via bearingDeg, not copied.
+        expect(state.iconTrack).toBe(0);
     });
 
     test('altitude eases toward its new target the same way position does, when a prior display altitude exists', () => {
@@ -709,41 +695,30 @@ describe('buildFeatureCollection position smoothing', () => {
         // Computed via smoothedScalar directly (rather than hand-derived alpha math)
         // so this stays correct regardless of whether the 5000ft gap trips the rate
         // cap -- 6000/60 (MAX_ALT_CORRECTION_FPM/60) matches the internal constant.
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: 10000, baro_rate: 6000 })]]);
-        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, alt: 11000 }]]);
         const dtS = 0.6, tauS = 0.6;
         const expectedAlt = smoothedScalar(11000, 16000, dtS, tauS, 6000 / 60);
+        const rec = movingRec({ gs: 0, alt_baro: 10000, baro_rate: 6000 });
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, dtS, tauS);
+        const state = deriveDisplayState(rec, ELAPSED_60S, { lat: 0, lon: 0, alt: 11000 }, dtS, tauS);
 
-        expect(fc.features[0].properties.alt_baro_ft).toBeCloseTo(expectedAlt, 6);
-        expect(displayByHex.get('a1b2c3').alt).toBeCloseTo(expectedAlt, 6);
+        expect(state.altBaroFt).toBeCloseTo(expectedAlt, 6);
         // The actual bug this closes: a 5000ft gap must NOT resolve in one 0.6s step
         // (that's the "visible reversal" -- an implied ~500,000ft/min climb rate).
-        expect(fc.features[0].properties.alt_baro_ft).toBeLessThan(11100);
+        expect(state.altBaroFt).toBeLessThan(11100);
     });
 
     test('altitude newly becoming known this cycle (no prior display altitude) is not eased -- renders directly', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: 10000, baro_rate: 6000 })]]);
         // Prior display exists (position was already being tracked) but never had an
         // altitude yet -- e.g. the aircraft was previously 'ground'/unknown.
-        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0 }]]);
-
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
-
-        expect(fc.features[0].properties.alt_baro_ft).toBeCloseTo(16000, 6);
-        expect(displayByHex.get('a1b2c3').alt).toBeCloseTo(16000, 6);
+        const rec = movingRec({ gs: 0, alt_baro: 10000, baro_rate: 6000 });
+        const state = deriveDisplayState(rec, ELAPSED_60S, { lat: 0, lon: 0 }, 0.6, 0.6);
+        expect(state.altBaroFt).toBeCloseTo(16000, 6);
     });
 
-    test('a non-numeric altitude (ground/unknown) is never smoothed and falls back to 0 in the built feature, same as unsmoothed', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: 'ground' })]]);
-        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, alt: 500 }]]);
-
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
-
-        expect(fc.features[0].properties.alt_baro_ft).toBe(0);
-        // The stale alt from a previous (now-ended) climb/descent must not linger.
-        expect(displayByHex.get('a1b2c3').alt).toBeUndefined();
+    test('a non-numeric altitude (ground/unknown) is never smoothed -- stays non-numeric, same as unsmoothed', () => {
+        const rec = movingRec({ gs: 0, alt_baro: 'ground' });
+        const state = deriveDisplayState(rec, ELAPSED_60S, { lat: 0, lon: 0, alt: 500 }, 0.6, 0.6);
+        expect(state.altBaroFt).toBe('ground');
     });
 
     // The actual bug this closes (caught live, repeatedly, on final approach): even
@@ -751,26 +726,25 @@ describe('buildFeatureCollection position smoothing', () => {
     // the icon backward for a moment -- real aircraft never do that, so it must be
     // held instead. See isBackwardCorrection's own docstring.
     test('a target landing behind the display (relative to current track) holds position instead of visibly moving backward', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 3600, track: 0 })]]);
         // target = interpolatedPosition({lat:0,lon:0,gs:3600,track:0}, 60) = {lat:1,lon:0}
-        const displayByHex = new Map([['a1b2c3', { lat: 2, lon: 0 }]]);  // already further along than the new target
+        const rec = movingRec({ lat: 0, lon: 0, gs: 3600, track: 0 });
+        const prevDisplay = { lat: 2, lon: 0 };   // already further along than the new target
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+        const state = deriveDisplayState(rec, ELAPSED_60S, prevDisplay, 0.6, 0.6);
 
-        expect(fc.features[0].geometry.coordinates).toEqual([0, 2]);
-        // No movement this frame (held) -- no bearing to derive, so icon_track/the
-        // stored track falls back to the raw reported track (0) rather than snapping.
-        expect(displayByHex.get('a1b2c3')).toEqual({ lat: 2, lon: 0, track: 0 });
-        expect(fc.features[0].properties.icon_track).toBe(0);
+        expect(state.pos).toEqual({ lat: 2, lon: 0 });
+        // No movement this frame (held) -- no bearing to derive, so icon_track falls
+        // back to the raw reported track (0) rather than snapping.
+        expect(state.iconTrack).toBe(0);
     });
 
     test('a target landing ahead of the display (relative to current track) eases normally, not held', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 3600, track: 0 })]]);
-        const displayByHex = new Map([['a1b2c3', { lat: 0.5, lon: 0 }]]);  // behind the new target (1)
+        const rec = movingRec({ lat: 0, lon: 0, gs: 3600, track: 0 });
+        const prevDisplay = { lat: 0.5, lon: 0 };   // behind the new target (1)
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+        const state = deriveDisplayState(rec, ELAPSED_60S, prevDisplay, 0.6, 0.6);
 
-        expect(fc.features[0].geometry.coordinates[1]).toBeGreaterThan(0.5);
+        expect(state.pos.lat).toBeGreaterThan(0.5);
     });
 
     // The actual feature this closes: the icon should point where it's actually
@@ -782,24 +756,19 @@ describe('buildFeatureCollection position smoothing', () => {
         // new target, so the icon's real eased movement has a genuine northward
         // component too -- it should point somewhere between north and east, not
         // snap to the raw 90.
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 3600, track: 90 })]]);
-        const displayByHex = new Map([['a1b2c3', { lat: -0.5, lon: 0, track: 90 }]]);
+        const rec = movingRec({ lat: 0, lon: 0, gs: 3600, track: 90 });
+        const prevDisplay = { lat: -0.5, lon: 0, track: 90 };
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+        const state = deriveDisplayState(rec, ELAPSED_60S, prevDisplay, 0.6, 0.6);
 
-        const iconTrack = fc.features[0].properties.icon_track;
-        expect(fc.features[0].properties.track).toBe(90);   // raw track is untouched
-        expect(iconTrack).toBeGreaterThan(0);
-        expect(iconTrack).toBeLessThan(90);
+        expect(state.iconTrack).toBeGreaterThan(0);
+        expect(state.iconTrack).toBeLessThan(90);
     });
 
     test('icon_track falls back to the raw track on first sighting (nothing to derive a bearing from yet)', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 3600, track: 137 })]]);
-        const displayByHex = new Map();
-
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
-
-        expect(fc.features[0].properties.icon_track).toBe(137);
+        const rec = movingRec({ lat: 0, lon: 0, gs: 3600, track: 137 });
+        const state = deriveDisplayState(rec, ELAPSED_60S, undefined, 0.6, 0.6);
+        expect(state.iconTrack).toBe(137);
     });
 
     // The actual bug this closes (found by replaying real captured adsb.lol data:
@@ -815,54 +784,47 @@ describe('buildFeatureCollection position smoothing', () => {
     // known" branch treated a null-so-far track as indistinguishable from a genuine
     // first sighting.
     test('a null raw track on first sighting stores a real number (0), not null, so a later bearing eases in rather than snapping', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 0, track: null })]]);
-        const displayByHex = new Map();
-
         // First sighting: no raw track, no movement to derive a bearing from either --
-        // must still store a real number so every later frame has something to ease
-        // from (the actual fix -- previously this stored track: null).
-        const fc1 = buildFeatureCollection(aircraftByHex, 1000, displayByHex, 0.6, 0.6);
-        expect(fc1.features[0].properties.icon_track).toBe(0);
-        expect(displayByHex.get('a1b2c3').track).toBe(0);
+        // must still return a real number so a later frame has something to ease from
+        // (the actual fix -- previously this stored track: null).
+        const rec1 = movingRec({ lat: 0, lon: 0, gs: 0, track: null });
+        const state1 = deriveDisplayState(rec1, 0, undefined, 0.6, 0.6);
+        expect(state1.iconTrack).toBe(0);
 
-        // A later real sample: the aircraft has moved (track is STILL null, matching
-        // real ground-phase data) -- icon_track can only come from bearingDeg's
-        // position-delta, due east (90deg) here.
-        aircraftByHex.set('a1b2c3', movingRec({
-            lat: 0, lon: 0.001, gs: 3600, track: null, receivedAt: 2000,
-        }));
-        const fc2 = buildFeatureCollection(aircraftByHex, 2600, displayByHex, 0.6, 0.6);
+        // A later real sample, easing from state1's returned display (exactly what
+        // buildFeatureCollection would have persisted into displayByHex): the aircraft
+        // has moved (track is STILL null, matching real ground-phase data) --
+        // icon_track can only come from bearingDeg's position-delta, due east (90deg)
+        // here.
+        const rec2 = movingRec({ lat: 0, lon: 0.001, gs: 3600, track: null });
+        const prevDisplay2 = { ...state1.pos, track: state1.iconTrack };
+        const state2 = deriveDisplayState(rec2, 1.6, prevDisplay2, 0.6, 0.6);
 
         // Rate-capped from the held 0, same as any other correction -- at most
         // 10deg/s * 0.6s = 6deg this frame, nowhere near the raw 90deg bearing. The
         // bug this replaces: icon_track jumping straight to ~90 in one frame.
-        expect(fc2.features[0].properties.icon_track).toBeCloseTo(6, 6);
+        expect(state2.iconTrack).toBeCloseTo(6, 6);
     });
 
     test('icon_track holds its previous value when there is no movement this frame (e.g. a hold, or a stationary aircraft)', () => {
-        const aircraftByHex = new Map([['a1b2c3', movingRec({ lat: 0, lon: 0, gs: 0, track: 45 })]]);
+        const rec = movingRec({ lat: 0, lon: 0, gs: 0, track: 45 });
         // Already displayed exactly at the target (gs=0 means the target never
         // advances) -- no movement this frame, so the previously-rendered track (200,
         // deliberately different from the raw 45) must be kept, not recomputed.
-        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, track: 200 }]]);
+        const prevDisplay = { lat: 0, lon: 0, track: 200 };
 
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+        const state = deriveDisplayState(rec, ELAPSED_60S, prevDisplay, 0.6, 0.6);
 
-        expect(fc.features[0].properties.icon_track).toBe(200);
+        expect(state.iconTrack).toBe(200);
     });
 
     // End-to-end wiring check for recordFromFeature's stalled-position fix (see that
-    // describe block) -- buildFeatureCollection must actually use deadReckonGs, not
+    // describe block) -- deriveDisplayState must actually use deadReckonGs, not
     // silently fall back to the real gs, once a record carries it.
     test('a stalled record (deadReckonGs=0) does not dead-reckon forward, even though the real reported gs is nonzero', () => {
-        const aircraftByHex = new Map([
-            ['a1b2c3', movingRec({ lat: 5, lon: 5, gs: 200, deadReckonGs: 0, track: 90 })],
-        ]);
-
-        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S);
-
-        expect(fc.features[0].geometry.coordinates).toEqual([5, 5]);   // unchanged from the raw reported position
-        expect(fc.features[0].properties.gs).toBe(200);   // popup still shows the real reported speed
+        const rec = movingRec({ lat: 5, lon: 5, gs: 200, deadReckonGs: 0, track: 90 });
+        const state = deriveDisplayState(rec, ELAPSED_60S, undefined, 0, 0.6);
+        expect(state.pos).toEqual({ lat: 5, lon: 5 });   // unchanged from the raw reported position
     });
 
     // The actual bug this closes (reported live: the icon "twitches", snapping to a
@@ -887,27 +849,91 @@ describe('buildFeatureCollection position smoothing', () => {
         const cosLat = Math.cos((startLat * Math.PI) / 180);
         const lonOffset = (lateralOffsetNm / 60.0) / cosLat;
 
-        const aircraftByHex = new Map([
-            ['a1b2c3', movingRec({
-                lat: startLat + 0.001, lon: startLon + lonOffset, gs, track: trueTrack, receivedAt: 0,
-            })],
-        ]);
-        const displayByHex = new Map([['a1b2c3', { lat: startLat, lon: startLon, track: trueTrack }]]);
+        const rec = movingRec({ lat: startLat + 0.001, lon: startLon + lonOffset, gs, track: trueTrack });
+        let prevDisplay = { lat: startLat, lon: startLon, track: trueTrack };
 
         const dtS = 1 / 60;
         let peakDeviation = 0;
         for (let frame = 1; frame <= 180; frame++) {   // 3s of real animation frames
-            const now = frame * dtS * 1000;
-            const fc = buildFeatureCollection(aircraftByHex, now, displayByHex, dtS, 0.6);
-            const iconTrack = fc.features[0].properties.icon_track;
-            const deviation = Math.min(Math.abs(iconTrack - trueTrack), 360 - Math.abs(iconTrack - trueTrack));
+            const state = deriveDisplayState(rec, frame * dtS, prevDisplay, dtS, 0.6);
+            const deviation = Math.min(
+                Math.abs(state.iconTrack - trueTrack), 360 - Math.abs(state.iconTrack - trueTrack),
+            );
             peakDeviation = Math.max(peakDeviation, deviation);
+            prevDisplay = { ...state.pos, track: state.iconTrack };
         }
 
         // Unfixed (raw bearingDeg with no rate cap), this scenario peaks at ~38.8deg
         // on the very first frame. MAX_ICON_TURN_RATE_DEG_S keeps the same scenario
         // well clear of anything reading as a "wrong direction" snap.
         expect(peakDeviation).toBeLessThan(20);
+    });
+});
+
+// buildFeatureCollection delegates all dead-reckoning/easing to deriveDisplayState
+// (see that describe block above) -- these tests only check the wiring: that omitting
+// displayByHex reduces to the raw target, and that a real displayByHex Map gets
+// deriveDisplayState's result written back into it correctly (including the
+// alt-key-inclusion rule) so the next call eases from here.
+describe('buildFeatureCollection display-state wiring', () => {
+    function movingRec(overrides = {}) {
+        return {
+            hex: 'a1b2c3', flight: 'ANZ423', category: '', receivedAt: 1000,
+            lat: 0, lon: 0, gs: 3600, track: 0, alt_baro: 'ground',
+            ...overrides,
+        };
+    }
+
+    // receivedAt=1000ms; now = 1000ms + 60s (in ms) -> elapsed = exactly 60s (right at,
+    // not past, the cap), so a 3600kt due-north flight moves exactly 1 degree of
+    // latitude.
+    const NOW_AFTER_60S = 1000 + 60 * 1000;
+
+    test('omitting displayByHex renders the raw dead-reckoned target, unsmoothed (backward compatible)', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
+        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S);
+        expect(fc.features[0].geometry.coordinates).toEqual([0, 1]);
+    });
+
+    test('a real displayByHex Map is populated on first sighting, keyed by hex', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
+        const displayByHex = new Map();
+        buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 1.0, 0.6);
+        expect(displayByHex.get('a1b2c3')).toEqual({ lat: 1, lon: 0, track: 0 });
+    });
+
+    test('the eased position and derived track are persisted into displayByHex, not the raw target', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec()]]);
+        const displayByHex = new Map([['a1b2c3', { lat: 0.2, lon: 0 }]]);
+        const dtS = 0.6, tauS = 0.6;
+        const target = interpolatedPosition({ lat: 0, lon: 0, gs: 3600, track: 0 }, 60);
+        const expectedPos = smoothedPosition({ lat: 0.2, lon: 0 }, target, dtS, tauS);
+
+        buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, dtS, tauS);
+
+        // displayByHex is updated in place so the next frame eases from here, not
+        // from the stale 0.2 starting point.
+        expect(displayByHex.get('a1b2c3')).toEqual({ ...expectedPos, track: 0 });
+    });
+
+    test('a numeric eased altitude is persisted into displayByHex under `alt`', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: 10000, baro_rate: 6000 })]]);
+        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, alt: 11000 }]]);
+
+        buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+
+        expect(displayByHex.get('a1b2c3').alt).toBeCloseTo(smoothedScalar(11000, 16000, 0.6, 0.6, 6000 / 60), 6);
+    });
+
+    test('a non-numeric altitude (ground/unknown) is omitted from displayByHex, not carried forward as stale, and falls back to 0 in the built feature', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: 'ground' })]]);
+        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, alt: 500 }]]);
+
+        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+
+        expect(fc.features[0].properties.alt_baro_ft).toBe(0);
+        // The stale alt from a previous (now-ended) climb/descent must not linger.
+        expect(displayByHex.get('a1b2c3').alt).toBeUndefined();
     });
 });
 

@@ -87,7 +87,15 @@ export function hoverPopup(map, layerId, {
         overMarker = true;
         cancelClose();
         map.getCanvas().style.cursor = 'pointer';
-        const coords = e.features[0].geometry.coordinates.slice();
+        // Point features anchor the popup to their own coordinate (stable even as the
+        // mouse moves within a small marker's hit area); anything else (e.g. Troublespots'
+        // polygons) has no single representative point, so anchor to where the mouse
+        // actually is instead -- a Polygon's geometry.coordinates is a nested rings
+        // array, not a [lon, lat] pair, and would hand setLngLat garbage. Checked by
+        // shape (a flat pair's first entry is a number) rather than geometry.type, so
+        // fixtures that only set coordinates still behave like real GeoJSON.
+        const coordinates = e.features[0].geometry.coordinates;
+        const coords = typeof coordinates[0] === 'number' ? coordinates.slice() : e.lngLat;
         popup.setLngLat(coords).setHTML(html(e.features[0])).addTo(map);
         // Only reachable once addTo() has actually built the DOM -- re-wired on
         // every open since remove() discards the previous element.

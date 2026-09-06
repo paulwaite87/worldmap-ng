@@ -8,6 +8,7 @@ own logic is unchanged (a verbatim move); these tests lock the architectural spl
 itself and smoke-test the mixin still works when mixed into a bare instance.
 """
 import os
+from datetime import datetime, timedelta, timezone
 
 from atmos_gl.tasks.common import Updater, MultiHourRenderMixin, ForecastState
 
@@ -76,6 +77,63 @@ def test_should_plot_for_hour_true_when_output_missing(tmp_path):
     u = make_bare_multi_hour_layer(str(tmp_path / "isobars.png"))
     state = ForecastState.at_hour("2026-06-13", "18", 3)
     assert u.should_plot_for_hour(state, "isobars") is True
+
+
+class _FakeStore:
+    """Reports the data as already written `age` ago -- older than the (freshly
+    touched) output file, so should_plot_for_hour's data-freshness check reads as
+    'fresh', isolating the settings_sig check the tests below exercise."""
+
+    def __init__(self, age=timedelta(hours=1)):
+        self._updated_at = datetime.now(timezone.utc) - age
+
+    def get_field_meta(self, run_date_str, run_id, fhour, product_name):
+        return {"updated_at": self._updated_at}
+
+
+def make_complete_multi_hour_layer(tmp_path):
+    """A bare multi-hour layer whose single required output (isobars_f003.png) exists
+    and is data-fresh -- isolates should_plot_for_hour's settings_sig branch from the
+    unrelated missing-file / data-mtime checks."""
+    base = str(tmp_path / "isobars.png")
+    u = make_bare_multi_hour_layer(base)
+    u._store = _FakeStore()
+    out = tmp_path / "isobars_f003.png"
+    out.write_bytes(b"fake-png-bytes")
+    return u, str(out)
+
+
+def test_should_plot_for_hour_true_when_settings_sig_sidecar_missing(tmp_path):
+    """A settings_sig is given but no '<out>.sig' was ever written (e.g. rendered
+    before this check existed, or under a settings-blind caller) -- treated as stale,
+    not silently trusted."""
+    u, _out = make_complete_multi_hour_layer(tmp_path)
+    state = ForecastState.at_hour("2026-06-13", "18", 3)
+    assert u.should_plot_for_hour(state, "isobars", settings_sig="sig-a") is True
+
+
+def test_should_plot_for_hour_true_when_settings_sig_mismatches(tmp_path):
+    """The actual bug this guards against: data unchanged, but the config-derived
+    signature (e.g. isobars' linewidth) differs from what was last rendered."""
+    u, out = make_complete_multi_hour_layer(tmp_path)
+    u._write_render_signature(out, "old-sig")
+    state = ForecastState.at_hour("2026-06-13", "18", 3)
+    assert u.should_plot_for_hour(state, "isobars", settings_sig="new-sig") is True
+
+
+def test_should_plot_for_hour_false_when_settings_sig_matches_and_data_fresh(tmp_path):
+    u, out = make_complete_multi_hour_layer(tmp_path)
+    u._write_render_signature(out, "sig-a")
+    state = ForecastState.at_hour("2026-06-13", "18", 3)
+    assert u.should_plot_for_hour(state, "isobars", settings_sig="sig-a") is False
+
+
+def test_should_plot_for_hour_ignores_settings_sig_when_not_given(tmp_path):
+    """Callers that don't pass settings_sig (the default, None) keep the old
+    data-only freshness behaviour -- no '.sig' sidecar required."""
+    u, _out = make_complete_multi_hour_layer(tmp_path)
+    state = ForecastState.at_hour("2026-06-13", "18", 3)
+    assert u.should_plot_for_hour(state, "isobars") is False
 
 
 def test_publish_current_hour_copies_per_hour_output_to_base_name(tmp_path):

@@ -21,7 +21,13 @@ critical-palette fields):
 
 A fresh checkout has no live `config/atmos-gl.json` at all — only the `.tmpl`. `make
 up`/`make prod` bootstrap it automatically (see the Makefile's `bootstrap-config`
-target: copies the template over if the live file is missing, never overwrites an
-existing one). CI does the same as an explicit step before running pytest. Anything
-that reads config outside those paths (a one-off script, a fresh test run) needs that
-copy to exist first.
+target): a missing live file is just copied from the template; an existing one is
+instead run through `tools/sync_config.py`, which reconciles its *shape* against the
+template — adding any section/option the template defines that the live file is
+missing, and dropping any the template no longer defines — without ever touching the
+*value* of a setting already present in both. This is what keeps an existing
+deployment's live config from silently missing a newly-added feature's section (e.g.
+`world_events`) after an upgrade, since the live file predates that section and
+nothing else would ever add it in. CI does the fresh-checkout path (an explicit step
+before running pytest). Anything that reads config outside those paths (a one-off
+script, a fresh test run) needs that copy to exist first.

@@ -70,6 +70,31 @@ def test_me_settings_page_renders_only_personalizable_precipitation_fields(clien
     assert 'id="precipitation__level_of_detail"' not in resp.text
 
 
+def test_me_settings_page_shows_world_events_in_the_show_tab(client, tmp_path):
+    """Regression guard for me_settings.html's `categories` list -- a second,
+    independently-hardcoded section grouping from config.html's own tab groups --
+    silently omitting a section that's actually personalizable. world_events shipped
+    with config.html updated but this template's categories list missed, so the
+    section was invisible on this page (though correctly configurable as admin)
+    until fixed."""
+    _sign_in(client, FakeUserSettingsAdapter())
+    with _with_temp_config_for_me_settings(
+        tmp_path,
+        {
+            "world_events": {
+                "enabled": False, "opacity": 80, "marker_size": 1.0, "expiry_days": 7,
+                "min_mentions": 10, "backfill_days": 3,
+                "show_explosion": True, "show_warfare": True,
+                "show_targeted_violence": True, "show_diplomacy": True,
+            }
+        },
+    ):
+        resp = client.get("/me/settings")
+
+    assert resp.status_code == 200
+    assert 'id="world_events__enabled"' in resp.text
+
+
 def test_me_settings_page_shows_the_users_own_override_not_the_global_value(client, tmp_path):
     fake_settings = FakeUserSettingsAdapter()
     user_id = _sign_in(client, fake_settings)

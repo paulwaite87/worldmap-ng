@@ -7,10 +7,12 @@ call, and unpacking the data_format=netcdf_zip archive every CDS dataset in this
 delivers.
 """
 import concurrent.futures
+import glob
 import logging
 import os
 import shutil
 import tempfile
+import uuid
 import zipfile
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,7 @@ def retrieve_and_unzip(
 
 def retrieve_with_fallback(
     client, dataset: str, requests: list, dest: str, timeout_s: float, label: str,
+    unzip: bool = True,
 ) -> bool:
     """Try each request in `requests` (an ordered, freshest-first list of full CDS
     request dicts) via retrieve_and_unzip(), stopping at the first that succeeds.
@@ -96,11 +99,56 @@ def retrieve_with_fallback(
     see the published spec's issue comments) -- so each caller builds its own
     freshest-first candidate list and this function only owns the shared "try each,
     stop at the first success" mechanics, same day-search-fallback spirit
-    resolve_gfs_baseline() (lib/gfs.py) uses for GFS's own publish lag."""
+    resolve_gfs_baseline() (lib/gfs.py) uses for GFS's own publish lag.
+
+    `unzip=False` (GloFAS's `data_format=netcdf, download_format=unarchived` delivers a
+    bare .nc directly -- confirmed live against the real EWDS API, see issue #371's
+    spike) skips retrieve_and_unzip's archive-extraction step and downloads straight to
+    `dest` via retrieve_with_timeout instead."""
     last_error = None
     for request in requests:
         try:
-            retrieve_and_unzip(client, dataset, request, dest, timeout_s, label)
+            if unzip:
+                retrieve_and_unzip(client, dataset, request, dest, timeout_s, label)
+            else:
+                # retrieve_with_timeout writes straight to its target with no atomic
+                # rename, and (per its own docstring) does NOT cancel a timed-out
+                # background download -- which could keep writing to `dest` after this
+                # call returns. Downloading to a tempfile first and only replacing
+                # `dest` on success (mirroring retrieve_and_unzip's own tmp_dest/
+                # os.replace step) keeps a timed-out/failed attempt from ever leaving a
+                # partial file at the real cache path.
+                #
+                # tmp_dest carries a random per-call suffix, NOT a fixed f"{dest}.tmp"
+                # -- confirmed live on prod (flood_risk_live): a timed-out attempt's
+                # orphaned background thread keeps writing to whatever path it was
+                # given (per the paragraph above) for an unknown further duration, and
+                # the FOLLOWING call would otherwise target that same fixed path.
+                # multiurl (the HTTP layer cdsapi uses) resumes from a partial file's
+                # on-disk size with no remote content/ETag validation, so two callers'
+                # writes to one shared path race and corrupt each other -- observed
+                # live as the .tmp file's byte offset jumping backwards by over a
+                # gigabyte between attempts instead of only ever growing. A fresh,
+                # unique path per call means an orphaned straggler thread can only ever
+                # collide with itself.
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                # Sweep any stale sibling left behind by an earlier call's abandoned
+                # attempt -- these carry the "_cache_" marker in their basename (same
+                # as `dest` itself), but housekeeper.sweep()'s expiry-based cleanup
+                # only fires once a layer's own cache_expiry_days elapses (often
+                # unset/0 -- "keep forever" -- for a file-cache layer like this one),
+                # so an orphan here could otherwise sit for a very long time. Safe to
+                # remove even if a straggler thread is still writing to it (POSIX
+                # unlink just detaches the name; the thread keeps its open handle
+                # until it finishes, then the space is reclaimed).
+                for stale in glob.glob(f"{dest}.*.tmp"):
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
+                tmp_dest = f"{dest}.{uuid.uuid4().hex}.tmp"
+                retrieve_with_timeout(client, dataset, request, tmp_dest, timeout_s)
+                os.replace(tmp_dest, dest)
             logger.info(f"{label}: cached -> {os.path.basename(dest)}")
             return True
         except concurrent.futures.TimeoutError:

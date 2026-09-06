@@ -7,6 +7,8 @@ DB_USER = agl
 DB_NAME = atmos_gl
 DB_SERVICE = atmos_gl_db
 DUMP_FILE = atmos_gl_dump.sql
+BUILDER_SERVICE = layer_builder
+BACKEND_SERVICES = data_collector layer_builder housekeeper map_api
 
 export DOCKER_UID := $(shell id -u)
 export DOCKER_GID := $(shell id -g)
@@ -28,14 +30,7 @@ check-git:
 	fi
 
 bootstrap-config: install-shell-alias
-	@if [ ! -f config/atmos-gl.json ]; then \
-		cp config/atmos-gl.json.tmpl config/atmos-gl.json; \
-		echo "Created config/atmos-gl.json from config/atmos-gl.json.tmpl"; \
-	fi
-	@if [ ! -f .env ]; then \
-		cp .env.tmpl .env; \
-		echo "Created .env from .env.tmpl -- edit this to add your API keys"; \
-	fi
+	@bash scripts/bootstrap-config.sh
 
 install-shell-alias:
 	@marker="# atmos-gl: bare 'make' here runs 'make -f Makefile.prod' (added by install-shell-alias)"; \
@@ -76,66 +71,23 @@ release: bootstrap-config
 
 ## logs: Tail all logs; service=name for specific service
 logs:
-ifndef service
-	docker compose -f docker-compose.yml logs -f
-else
-	docker compose -f docker-compose.yml logs -f ${service}
-endif
+	@COMPOSE_ARGS="-f docker-compose.yml" bash scripts/logs.sh $(service)
 
 ## psql: Open psql session in the atmos_gl database
 psql:
-	@echo "Ensuring atmos_gl database is running"
-	@docker compose -f docker-compose.yml up $(DB_SERVICE) -d
-	@docker compose -f docker-compose.yml exec $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME)
+	@COMPOSE_ARGS="-f docker-compose.yml" DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) bash scripts/psql.sh
 
 ## backup: Backup database to local atmos_gl_dump.sql file
 backup:
-	@echo "Ensuring atmos_gl database is running"
-	docker compose -f docker-compose.yml up $(DB_SERVICE) -d
-	@echo "Creating compressed database backup to $(DUMP_FILE)..."
-	docker compose -f docker-compose.yml exec $(DB_SERVICE) pg_dump -U $(DB_USER) -Fc $(DB_NAME) > $(DUMP_FILE)
-	@echo "Backup complete."
+	@COMPOSE_ARGS="-f docker-compose.yml" DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) DUMP_FILE=$(DUMP_FILE) bash scripts/backup.sh
 
 ## restore: Restores the local atmos_gl_dump.sql backup
 restore:
-	@echo "WARNING: This will DELETE and RECREATE the $(DB_NAME) database from $(DUMP_FILE)."
-	@if [ ! -f $(DUMP_FILE) ]; then echo "Error: $(DUMP_FILE) not found."; exit 1; fi
-	@read -p "Are you sure? [y/N] " ans; \
-	if [ "$${ans:-N}" = "y" ] || [ "$${ans:-N}" = "Y" ]; then \
-		echo "Stopping backend services" ; \
-		docker compose -f docker-compose.yml stop data_collector layer_builder housekeeper map_api; \
-		echo "Ensuring atmos_gl database is running..." ; \
-		docker compose -f docker-compose.yml up $(DB_SERVICE) -d && sleep 5 ; \
-		echo "Restoring database..." ; \
-		cat $(DUMP_FILE) | docker compose -f docker-compose.yml exec -T $(DB_SERVICE) pg_restore -U $(DB_USER) -d postgres --clean --create --if-exists ; \
-		echo "Restore complete." ; \
-		echo "Stopping atmos_gl database. Backend left as stopped." ; \
-		docker compose -f docker-compose.yml stop $(DB_SERVICE) ; \
-	fi
+	@COMPOSE_ARGS="-f docker-compose.yml" DB_SERVICE=$(DB_SERVICE) DB_USER=$(DB_USER) DB_NAME=$(DB_NAME) DUMP_FILE=$(DUMP_FILE) BACKEND_SERVICES="$(BACKEND_SERVICES)" bash scripts/restore.sh
 
 ## status: Database Status Report
 status:
-	@echo "--- Ships Located in Each Region ---"
-	@docker compose -f docker-compose.yml exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT r.label as region, count(s.mmsi) as ships \
-	 FROM map_region r \
-	 LEFT JOIN ships s ON ST_Within(s.geom, r.boundary) \
-	 GROUP BY r.label \
-	 ORDER BY ships DESC;"
-	@echo "\n--- Database Composition (Unique Ships) ---"
-	@docker compose -f docker-compose.yml exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT \
-	    count(*) FILTER (WHERE name != 'Unknown' AND vessel_type != 0) as full_records, \
-	    count(*) FILTER (WHERE name = 'Unknown' AND vessel_type = 0) as shadow_records, \
-	    count(*) as total \
-	 FROM ships;"
-	@echo "--- Lightning Strikes in Each Region ---"
-	@docker compose -f docker-compose.yml exec -T $(DB_SERVICE) psql -U $(DB_USER) $(DB_NAME) -c \
-	"SELECT r.label as region, count(l.id) as strikes \
-	 FROM map_region r \
-	 LEFT JOIN lightning_strikes l ON ST_Within(l.geom, r.boundary) \
-	 GROUP BY r.label \
-	 ORDER BY strikes DESC;"
+	@COMPOSE_ARGS="-f docker-compose.yml" BUILDER_SERVICE=$(BUILDER_SERVICE) bash scripts/status.sh
 
 ## help: Show this help menu
 help:

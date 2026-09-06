@@ -74,6 +74,11 @@ class SliderSpec:
 class SelectSpec:
     options: list  # [(value, label), ...]
     personalizable: bool = False
+    # Optional small hint rendered under the <select> (same spot as multiselect's
+    # "Hold Ctrl..." hint) -- for a choice whose effect depends on another field in
+    # the same section (e.g. sst.palette only applying in absolute mode), so the
+    # picker doesn't look broken/no-op when that other field is set the "wrong" way.
+    help_text: str | None = None
     kind: str = field(default="select", init=False)
 
 
@@ -222,6 +227,18 @@ _MODE_OPTIONS = SelectSpec([
 _GHG_SPECIES = SelectSpec([
     ("co2", "CO2"),
     ("ch4", "CH4 (Methane)"),
+], personalizable=True)
+
+# Flood Risk's two modes are independently-sourced metrics, not two views of the same
+# data (see issue #371's design grill and its follow-up) -- Live is NASA LANCE MODIS
+# observed flooding (needs EARTHDATA_TOKEN; originally a daily GloFAS forecast,
+# abandoned for unfixable OOM/network problems -- see collectors/flood_risk.py's
+# module docstring), Historical is a fixed JRC hazard classification (no credential).
+# Personalizable like every other client-side-only mode toggle (post-#312): switching
+# it just changes which pre-rendered texture this layer's next poll tick fetches.
+_FLOOD_RISK_MODE = SelectSpec([
+    ("live", "Live (Observed Inundation)"),
+    ("historical", "Historical (JRC 100yr Hazard)"),
 ], personalizable=True)
 
 # CAMS EGG4 reanalysis (the anomaly baseline source) was never extended past 2020, so
@@ -443,6 +460,46 @@ FIELD_SPECS = {
     ("fires", "min_risk_filter"): SliderSpec(
         min=0, max=100, step=5, suffix="", zero_label="off", personalizable=True
     ),
+    # World Events (GDELT Event Database 2.0, curated CAMEO code allowlist -- see
+    # collectors/world_events.py). expiry_days is a pure read-time WHERE filter
+    # (WorldEventAdapter.get_events_as_geojson) -- every viewer shares the same
+    # underlying rows, only how far back a given query looks changes, same shape as
+    # quakes'/fires' own personalizable expiry sliders. min_mentions/backfill_days
+    # are NOT personalizable: unlike fires' confidence/frp (filtered only at read
+    # time, every detection is always stored), min_mentions gates what
+    # WorldEventsCollector.collect() stores in the first place -- a real,
+    # shared collection-cost control, not a per-viewer display preference.
+    ("world_events", "enabled"): _ENABLED_PERSONALIZABLE,
+    ("world_events", "opacity"): _OPACITY,
+    ("world_events", "marker_size"): SliderSpec(
+        min=0.5, max=3.0, step=0.1, decimals=1, suffix="x", personalizable=True
+    ),
+    ("world_events", "expiry_days"): SliderSpec(
+        min=1, max=14, step=1, suffix=" day", pluralize=True, personalizable=True
+    ),
+    ("world_events", "min_mentions"): SliderSpec(min=0, max=100, step=5),
+    ("world_events", "backfill_days"): SliderSpec(
+        min=1, max=14, step=1, suffix=" day", pluralize=True
+    ),
+    ("world_events", "show_explosion"): ToggleSpec(personalizable=True),
+    ("world_events", "show_warfare"): ToggleSpec(personalizable=True),
+    ("world_events", "show_targeted_violence"): ToggleSpec(personalizable=True),
+    ("world_events", "show_diplomacy"): ToggleSpec(personalizable=True),
+    # Troublespots (issue #366) -- a derived multi-domain convergence layer over
+    # World Events/Earthquakes/Fires/Volcanic Activity, computed live per request (no
+    # table, no collector of its own). cell_size_deg/window_hours are NOT
+    # personalizable, unlike every other layer's opacity/expiry: they control the
+    # underlying convergence computation itself, which is meant to be one objective,
+    # shared signal every viewer sees the same way -- letting each user tune their own
+    # severity map would undermine that (see the design's roster/config decision).
+    ("troublespots", "enabled"): _ENABLED_PERSONALIZABLE,
+    ("troublespots", "opacity"): _OPACITY,
+    ("troublespots", "cell_size_deg"): SliderSpec(
+        min=1.0, max=5.0, step=0.5, decimals=1, suffix=" deg"
+    ),
+    ("troublespots", "window_hours"): SliderSpec(
+        min=12, max=168, step=12, suffix="h"
+    ),
     # --- Misc (satellites, terminator, markers, flightradar) ---
     ("satellites", "enabled"): _ENABLED_PERSONALIZABLE,
     ("satellites", "sat_names"): _SAT_NAMES,
@@ -618,7 +675,7 @@ FIELD_SPECS = {
         ("vivid", "Vivid"),
         ("deep", "Deep"),
         ("ocean", "Ocean"),
-    ], personalizable=True),
+    ], personalizable=True, help_text="Only applies in Absolute mode -- Anomaly mode always uses a fixed red/blue scale."),
     ("sst", "min_c"): _MIN_MAX_C,
     ("sst", "max_c"): _MIN_MAX_C,
     ("sst", "cache_expiry_days"): _CACHE_EXPIRY_DAYS,
@@ -705,6 +762,14 @@ FIELD_SPECS = {
     # ("volcanoes", "so2_min") above, which now belongs to the separate
     # volcanic-specific SO2 variable Smoke Plume renders instead.
     ("air_quality", "so2_min"): SliderSpec(min=0, max=20, step=0.5, decimals=1, suffix=" DU"),
+    # --- Flood Risk (issue #371) -- both mode's variants render every cycle
+    # regardless of the configured mode (FloodRiskUpdater.run(), same "render
+    # everything, publish only what's selected" shape as GHG's species/mode), and
+    # rendering is entirely client-side (raw data texture + client LUT, issue #312's
+    # convention) -- so mode/opacity are personalizable exactly like GHG's above. ---
+    ("flood_risk", "enabled"): _ENABLED_PERSONALIZABLE,
+    ("flood_risk", "mode"): _FLOOD_RISK_MODE,
+    ("flood_risk", "opacity"): _OPACITY,
     # --- Background (shipping_collector, lightning_collector, satellites_collector,
     # data_collector, housekeeper) ---
     ("shipping_collector", "enabled"): _ENABLED,
@@ -772,6 +837,12 @@ _LABEL_OVERRIDES = {
     ("fires", "min_risk_filter"): "Fire risk display threshold",
     ("volcanoes", "smoke_opacity"): "Smoke Plume Opacity",
     ("volcanoes", "so2_min"): "Smoke Plume Threshold",
+    ("world_events", "min_mentions"): "Minimum corroborating sources",
+    ("world_events", "backfill_days"): "Initial backfill window",
+    ("world_events", "show_warfare"): "Show conflict",
+    ("world_events", "show_targeted_violence"): "Show targeted / mass violence",
+    ("troublespots", "cell_size_deg"): "Cell size (degrees)",
+    ("troublespots", "window_hours"): "Convergence window",
 }
 
 
@@ -807,6 +878,8 @@ SECTION_LABELS = {
     "quakes": "Earthquakes",
     "volcanoes": "Volcanoes",
     "fires": "Wildfires",
+    "world_events": "World Events",
+    "troublespots": "Troublespots",
     "satellites": "Satellites",
     "terminator": "Terminator Night/day Shade",
     "markers": "Place Markers",

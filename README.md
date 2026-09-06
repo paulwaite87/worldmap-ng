@@ -55,7 +55,8 @@ Edit `.env` and fill in your API keys — see [Map Tiles API Key](#map-tiles-api
 [Shipping Data API Key](#shipping-data-api-key),
 [Lightning Strikes API Key](#lightning-strikes-api-key),
 [NASA FIRMS API Key](#nasa-firms-api-key),
-[Copernicus CDS/ADS API Key](#copernicus-cdsads-api-key)
+[Copernicus CDS/ADS API Key](#copernicus-cdsads-api-key),
+[NASA Earthdata Login Token](#nasa-earthdata-login-token)
 
 The map tiles key is MANDATORY for the globe's basemap to render at all. All others 
 are optional (you can enable them later once you have keys).
@@ -86,6 +87,10 @@ the configuration webpage there. If you do use that page, and save some changes 
 will overwrite your `atmos-gl.json` — which is fine, but if you want to preserve your own
 hand-edits, make a backup copy of the file first.
 
+The configurator and the Data Status page (below) both require signing in as an admin —
+see [Account & Personal Settings](#account--personal-settings) for how an account
+becomes an admin.
+
 The live globe itself is at `http://localhost:8180`.
 
 Here is a shot of the homepage for the configurator at `http://localhost:9000/config`
@@ -100,6 +105,25 @@ If you change something in `config/atmos-gl.json` by hand rather than through th
 restart the backend to pick it up:
 
     ./atmos-gl.sh restart
+
+### Account & Personal Settings
+The live globe itself (`http://localhost:8180`) needs no account at all — it's open to
+anyone who can reach it. Signing in (Google or GitHub, via the hamburger menu top-right)
+unlocks two things beyond that:
+
+* **Personal settings** — a signed-in user can save their own overrides for most sliders/
+  toggles/colours (camera start position, palettes, opacity, thresholds and the like),
+  layered on top of the shared `config/atmos-gl.json` rather than replacing it: your
+  override wins for you, everyone else still gets the shared default. Settings that
+  affect what the backend actually renders (not just how it's displayed) stay admin-only,
+  shared config.
+* **Admin access** — one or more accounts can be designated admin (via an email
+  allowlist in `.env`). Only an admin account can reach the configurator
+  (`http://localhost:9000/config`, which edits the shared `atmos-gl.json` default
+  everyone else's overrides sit on top of) and the Data Status page.
+
+The account menu also has a settings link, sign-out, account deletion, and shows the
+running release version in its footer.
 
 ### API Keys
 Some of the data resources we are lucky enough to have free access to are only available
@@ -189,6 +213,18 @@ Once the key is set (and, for Greenhouse Gases, the licence accepted), select
 `Greenhouse Gases` in the Atmos GL Configurator's `Show` tab under the `Climate`
 group, and/or `Air Quality` under the `Events` group.
 
+#### NASA Earthdata Login Token
+This is optional.
+It's for [Flood Risk](#flood-risk)'s `Live` mode (observed current flooding) — `Historical`
+mode needs no credential at all, so the layer still works without this if you'd rather
+skip it.
+
+Register a free account at https://urs.earthdata.nasa.gov, log in, open your profile,
+and use `Generate Token` to create a Bearer token. Put it in `.env` as `EARTHDATA_TOKEN`.
+Unlike the other keys above, this token expires after around 60 days — there's no
+automatic renewal, so if `Live` mode suddenly stops updating, regenerate one and drop
+the new value in.
+
 ### Forecasting
 The map has a time scrubber built right into it — play, step forward/back, or drag through
 the available forecast hours (configurable, default 24) for any layer that supports 
@@ -211,6 +247,22 @@ night side of the globe with a soft transition at the terminator line, for a rea
 of what's happening on the planet day and night. It has its own opacity, colour and edge
 softness settings if you'd like to tune the look, and can simply be switched off if you'd
 rather have an unshaded view of whatever layers you have enabled.
+
+### Place Markers
+A static layer of city/town and marine feature labels (in the `Miscellaneous` group of
+the `Show` tab), with priority-based label collision handling so busy areas don't turn
+into an unreadable jumble of overlapping text as you zoom in and out. Turn on
+`Weather popup` and hovering a marker shows a live-sampled temperature, humidity and
+wind reading for that exact point, sourced from the same GFS atmos data every other
+weather layer uses — a quick way to check conditions for a specific city without
+needing any colourising layer switched on at all.
+
+### Coastline Outline (Landmass)
+A thin outline layer (`Miscellaneous` group) tracing coastlines and lake shores,
+independent of any basemap style. Useful mainly alongside data layers or basemaps
+where landmass boundaries otherwise get lost — it has its own line colour, a
+contrasting halo colour (so it stays legible over any combination of basemap and data
+layers underneath), line width and opacity.
 
 ### Watching It Work
 To tail the logs of everything:
@@ -256,6 +308,7 @@ The full list is:
 * Clouds
 * Isobars
 * Wind speed & direction
+* Jet stream
 * Precipitation
 * Precipitable water (atmospheric moisture)
 * Sea surface temperature
@@ -269,11 +322,16 @@ The full list is:
 * Active storms
 * Earthquakes
 * Volcanoes (with a Smoke Plume/SO2 overlay)
+* Wildfires
+* World Events (conflict, explosions and high-level diplomacy)
+* Troublespots (multi-source convergence zones)
 * Air Quality (PM2.5/PM10/Smoke/SO2)
+* Flood Risk (live observed inundation / historical hazard)
 * Shipping
 * Flight Radar
 * Satellites
 * Place markers
+* Landmass outline (coastlines/lakes)
 
 Each of these has its own configuration options.
 
@@ -281,7 +339,10 @@ Hopefully the settings in each section are fairly self-explanatory.
 
 In the web configuration UI, the `Show` tab controls what gets shown on the map. If 
 something is disabled, then the following tabs will show that section disabled, to avoid 
-cluttering the interface.
+cluttering the interface. A checked layer whose underlying `Data Collector` is itself
+switched off (see [Data Collector](#data-collector) below) is greyed out too, with an
+explanation — a nudge that the checkbox alone won't get you data, since there's nothing
+being collected for it to show.
 
 The data for these elements is also updated according to a frequency determined by a 
 `Runs per day `setting. This is to restrict load on the remote servers, which only update 
@@ -343,6 +404,15 @@ layer is quite good paired with isobars where you can see the effect of differin
 pressure. If you want to see Precipitation at the same time as Wind then I recommend
 you set `Heatmap opacity` of the underlying wind speed canvas to zero.
 ![Wind](docs/atmos-gl-wind.png)
+
+#### Jet Stream
+The high-altitude core of fastest wind (around the 250mb level), shown as animated
+particle trails the same way Wind is, but with no underlying heatmap — the trails
+themselves, colour-coded by speed, are the whole picture. It shares Wind/Currents'
+particle engine, and reads the same GFS atmos data, just at a much higher, faster-moving
+level. A `Palette` selector lets you pick between a few different colour treatments
+(`stratosphere`, `aurora`, `inferno`) for however you like the jet core to look against
+the basemap.
 
 #### Waves
 This one is a colourisation depicting wave height across the planet, GFS-sourced (same
@@ -452,6 +522,46 @@ fires are most probably burning. When you see a group of many together spread ac
 a line or in a cluster, there is a high probability is is a wildfire.
 ![Wildfires](docs/atmos-gl-wildfires.png)
 
+#### World Events
+Sourced from the [GDELT Project](https://www.gdeltproject.org)'s real-time Event
+Database, refreshed roughly every 15 minutes. Rather than showing GDELT's entire
+firehose of hundreds of thousands of daily events, this layer is filtered down to a
+curated, high-signal set of four categories:
+
+* **Explosion** — suicide, car and roadside bombings
+* **Conflict** — armed conflict, occupation, ceasefire violations
+* **Targeted / mass violence** — abductions, assassinations, mass killings, use of
+  weapons of mass destruction
+* **Diplomatic Meeting** — a genuinely high-level summit or negotiation (NATO, the UN,
+  G7/G8/G20, the EU, and similar bodies), not just any two officials on a routine call
+
+Each category has its own marker colour, and can be individually shown or hidden in
+`World Events Properties`, alongside marker size, opacity, and how many days of history
+to display. Hovering a marker shows who was involved, where, when, how many sources
+reported it, and a link to read the original article. On first setup the layer
+backfills a configurable window of recent history (three days by default) so it isn't
+empty while waiting for new data to arrive, and self-heals if the collector is ever
+offline for a while.
+
+#### Troublespots
+A derived layer, not its own data source: it flags areas where at least two of four
+independently-collected feeds converge within the same geographic cell and time window —
+
+* **Earthquakes**
+* **Wildfires**
+* **Volcanic Activity**
+* **World Events** (any of the four categories above, counted once regardless of category)
+
+Convergence is banded by how many of the four types overlap in a cell — **Elevated** (2),
+**High** (3), **Severe** (4) — each rendered as a smooth, hatched boundary outlined in
+that band's colour, so it reads as a heatmap-style zone rather than a hard grid. Hovering
+a zone breaks down exactly which sources contributed and how many reports came from each.
+Cell size and time window are both configurable.
+
+Because it has no collector of its own, the `Show` checkbox is only available (not greyed
+out) once at least two of its four source layers' Data Collectors are enabled — with only
+zero or one contributing, a troublespot can never form.
+
 #### Air Quality
 Needs a [Copernicus CDS/ADS API Key](#copernicus-cdsads-api-key), the same one used by
 Greenhouse Gases below. Shows near-real-time air quality sourced from Copernicus CAMS's
@@ -480,6 +590,30 @@ familiar green → yellow → orange → red → purple AQI convention used by m
 weather apps' air-quality widgets.
 ![Air Quality](docs/atmos-gl-air-quality.png)
 
+#### Flood Risk
+A land-only layer with two independently-sourced modes sharing one `Mode` selector — they
+show genuinely different things, not two views of the same data:
+
+* `Live (Observed Inundation)` — actual flooding detected right now, from NASA's LANCE
+  MODIS satellite flood product. Needs a [NASA Earthdata Login Token](#nasa-earthdata-login-token).
+  This used to be a Copernicus GloFAS ensemble river-discharge *forecast* instead, but that
+  was abandoned entirely after repeated out-of-memory crashes and unfixable network
+  flakiness against ECMWF/Copernicus's shared backend — observed satellite detection turned
+  out to be both more reliable to collect and arguably more useful than a forecast anyway.
+  Optical satellite flood detection can occasionally mistake terrain shadow in mountainous
+  regions (low sun angle across steep valleys) for flooding — a spatial filter requiring
+  flagged pixels to sit near known water suppresses most of this, though not perfectly, so
+  don't be surprised by the odd stray pixel in hill country.
+* `Historical (JRC 100yr Hazard)` — a fixed, terrain-derived flood hazard classification
+  from the Copernicus/JRC Global River Flood Hazard Maps (100-year return period), no
+  credential needed. Four severity categories from a shade under 1m depth up to over 10m,
+  mosaicked once from ~90m-resolution tiles and cached forever, since it doesn't change
+  day to day the way `Live` does.
+
+Since the two modes measure different things on different scales, switching `Mode` doesn't
+just recolour the same data — it swaps which of the two independently-rendered layers you're
+looking at, applying instantly with no render wait either way.
+
 ### Climate
 This area is quite fascinating as it covers the entire planet. The data is sourced
 from https://nomads.ncep.noaa.gov/ which contains a staggering amount of publicly
@@ -488,14 +622,16 @@ Sea Surface Temperature, Air Temperature, Ocean Currents and
 the Ozone Layer data resolved to a 0.25 degree grid (with interpolation/smoothing
 as required).
 
-Each of Sea Surface Temperature, Ocean Currents, Air Temperature, Ozone,
-Storm Watch and Greenhouse Gases is mutually exclusive as a "climate base layer" — the
-`Show` tab presents them as radio buttons rather than independent checkboxes, since they
-each colourise the entire planet and having more than one on at once would just be a
-useless mashup of overlapping colours. In fact use of these layers is best done with
-just about every other colourising layer disabled — that would include Precipitation
-and Precipitable Water — though for marker elements such as Earthquakes, Shipping etc
-it isn't so important.
+Each of Sea Surface Temperature, Ocean Currents, Air Temperature, Ozone, Storm Watch
+and Greenhouse Gases can be shown independently — the `Show` tab presents them as
+regular checkboxes, so you're free to enable as many at once as you like (SST Anomaly
+alongside Ocean Currents, for instance). Since most of these colourise the entire
+planet, though, showing several at once usually turns into an overlapping mashup of
+colour rather than anything readable — `Opacity` on each layer is there to help you
+find a combination that works, and in general it's still worth keeping most other
+colourising layers (Precipitation, Precipitable Water) switched off while you're
+looking at Climate data, though marker elements like Earthquakes and Shipping are
+no problem to leave on alongside any of these.
 
 #### SST
 Sea Surface Temperature, sourced straight from NOAA's data. A fascinating visualisation
@@ -663,6 +799,11 @@ download requests, so all you scarifice there is some disk space. That said, if 
 genuinely never going to look at some of the data, it makes no sense to collect it.
 ![Data Status](docs/atmos-gl-conf-status.png)
 
+If you're running on a small VPS or a machine you don't want pegged, the `Global` tab's
+`Performance tier` setting (Low/Medium/High) caps how many layers `layer_builder` renders
+concurrently — lower it if rendering is starving other things on the host of CPU/RAM;
+raise it for faster rendering on a beefier machine.
+
 ### Satellites
 Plotting satellite paths is something that XPlanet did, and since that venerable project
 inspired this one, we do it here too.
@@ -727,12 +868,13 @@ Or just one service:
 
 See [Watching It Work](#watching-it-work) above for what a healthy log cycle looks like.
 
-One useful command for shipping is:
+One useful command for a quick data snapshot is:
 
     make status
 
-That will print out some status info about ships in each region, ship totals and also lightning
-strikes per region.
+That prints a summary of everything currently stored in the database — ships and lightning per
+region, plus earthquakes, volcanic activity, fires, world events, storms, satellites, weather
+model cache coverage, place markers, and flight radar — one heading per data domain.
 
 ### Testing a Changed Layer Faster (Round-Robin Priority)
 `layer_builder` renders the multi-hour layers (isobars, precipitation, wind, currents,

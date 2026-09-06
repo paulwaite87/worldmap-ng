@@ -15,6 +15,8 @@ from atmos_gl.routes import (
     volcanoes,
     quakes,
     fires,
+    world_events,
+    troublespots,
     lightning,
     shipping,
     config,
@@ -97,6 +99,8 @@ app.include_router(storms.router)
 app.include_router(volcanoes.router)
 app.include_router(quakes.router)
 app.include_router(fires.router)
+app.include_router(world_events.router)
+app.include_router(troublespots.router)
 app.include_router(lightning.router)
 app.include_router(shipping.router)
 app.include_router(config.router)

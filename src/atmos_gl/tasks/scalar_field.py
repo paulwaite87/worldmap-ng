@@ -258,10 +258,16 @@ class ScalarFieldUpdater(SingleHourScalarUpdater):
             cmap = self._resolve_cmap()
             norm = mcolors.Normalize(vmin=self.spec.vmin, vmax=self.spec.vmax)
 
+            # Closes the antimeridian seam for this static render only -- see
+            # close_lon_seam_for_contour's docstring. regrid_for_lod's own new_lons/
+            # values_smooth stay untouched for any other use (there is none here: the
+            # GPU data texture below is encoded from field0["values"], the native
+            # grid, not this LOD-regridded one).
+            contour_lons, contour_values = self.close_lon_seam_for_contour(new_lons, values_smooth)
             plot.ax.contourf(
-                new_lons,
+                contour_lons,
                 clamp_lats_to_mercator_limit(new_lats),
-                values_smooth,
+                contour_values,
                 levels=20,
                 cmap=cmap,
                 norm=norm,

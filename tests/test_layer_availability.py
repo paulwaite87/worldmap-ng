@@ -135,3 +135,47 @@ def test_sections_with_no_collector_dependency_are_absent_from_the_result():
     availability = compute_layer_availability(FakeConfig(_base_config()))
     assert "terminator" not in availability
     assert "landmass" not in availability
+
+
+# Troublespots (issue #366): requires >= MIN_CONVERGENCE_TYPES (2) of its 4 source
+# collectors' channels enabled to ever produce a result -- not a single-channel gate.
+def test_troublespots_collects_when_all_four_source_channels_are_on():
+    availability = compute_layer_availability(FakeConfig(_base_config()))
+    assert availability["troublespots"] == {"collecting": True, "reason": None}
+
+
+def test_troublespots_collects_with_exactly_the_minimum_two_channels_on():
+    config = _base_config()
+    config["data_collector"]["channel_enabled"]["fires"] = False
+    config["data_collector"]["channel_enabled"]["volcanoes"] = False
+    # quakes and world_events remain on -- exactly MIN_CONVERGENCE_TYPES (2).
+    availability = compute_layer_availability(FakeConfig(config))
+    assert availability["troublespots"]["collecting"] is True
+
+
+def test_troublespots_stops_collecting_with_fewer_than_the_minimum_channels_on():
+    config = _base_config()
+    config["data_collector"]["channel_enabled"]["fires"] = False
+    config["data_collector"]["channel_enabled"]["volcanoes"] = False
+    config["data_collector"]["channel_enabled"]["world_events"] = False
+    # Only quakes remains on -- below MIN_CONVERGENCE_TYPES (2).
+    availability = compute_layer_availability(FakeConfig(config))
+    assert availability["troublespots"] == {"collecting": False, "reason": REASON_PAUSED}
+
+
+def test_troublespots_stops_collecting_when_the_master_switch_is_off():
+    config = _base_config()
+    config["data_collector"]["enabled"] = False
+    availability = compute_layer_availability(FakeConfig(config))
+    assert availability["troublespots"]["collecting"] is False
+
+
+def test_troublespots_channels_missing_from_channel_enabled_default_to_on():
+    # world_events has no channel_enabled entry at all in the base fixture already;
+    # dropping quakes/fires/volcanoes too leaves every troublespots channel missing,
+    # and a missing entry defaults to on (matching every other channel_key's default).
+    config = _base_config()
+    for key in ("quakes", "fires", "volcanoes"):
+        del config["data_collector"]["channel_enabled"][key]
+    availability = compute_layer_availability(FakeConfig(config))
+    assert availability["troublespots"]["collecting"] is True

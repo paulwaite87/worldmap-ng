@@ -90,6 +90,24 @@ class PrecipitationUpdater(SingleHourScalarUpdater):
             ],
         }
 
+    def _render_settings_signature(self) -> str:
+        """Render-relevant settings for the static per-hour PNG -- min_mm_hr/opacity/
+        palette are all baked directly into it below (min_rate zeroes sub-threshold
+        cells, alpha/palette_name build the colormap). Mirrors
+        IsobarUpdater._render_settings_signature: without this, a settings-only edit
+        never touches the output file's mtime or the data's updated_at, so
+        should_plot_for_hour would silently never re-render an already-cached hour for
+        it. The GPU data texture ignores all three (fixed floor, no palette) and gets
+        over-invalidated along with the PNG, but plot() always regenerates both in one
+        call anyway."""
+        return self._settings_signature(
+            {
+                "min_mm_hr": self.settings.get("min_mm_hr", 0.1),
+                "opacity": self.settings.get("opacity", 50),
+                "palette": self.settings.get("palette", "standard"),
+            }
+        )
+
     def plot(self, field0, state: ForecastState):
         """Static region render (frame 0) + colourbar key + global N-frame texture.
 
@@ -132,10 +150,16 @@ class PrecipitationUpdater(SingleHourScalarUpdater):
 
         # Render Heatmap Contour
         prate_smooth = gaussian_filter(prate_smooth, sigma=filter_sigma)
+        # Closes the antimeridian seam for this static render only -- see
+        # close_lon_seam_for_contour's docstring. regrid_for_lod's own new_lons/
+        # prate_smooth stay untouched for any other use (there is none here: the GPU
+        # data texture below is encoded from field0["values"], the native grid, not
+        # this LOD-regridded one).
+        contour_lons, contour_prate = self.close_lon_seam_for_contour(new_lons, prate_smooth)
         plot.ax.contourf(
-            new_lons,
+            contour_lons,
             clamp_lats_to_mercator_limit(new_lats),
-            prate_smooth,
+            contour_prate,
             levels=levels,
             cmap=cmap,
             norm=norm,

@@ -1,8 +1,8 @@
 import { liveDataSync } from './_datasync.js';
 import { hoverPopup } from './_hoverpopup.js';
 import { fetchOrThrow, buildPopupHtml, preloadIcons } from './_feedhelpers.js';
-import { keyFilename, showLegend, removeLegend } from './_legend.js';
-import { opacityUniform } from './_opacity.js';
+import { standardLegend } from './_legend.js';
+import { so2VolcanicKeySpec } from './air_quality.js';
 
 // AirQualityUpdater._output_path_for("so2_volcanic") (tasks/air_quality.py), derived
 // from lib/output_files.py's OUTFILES["air_quality"] -- rendered unconditionally every
@@ -56,7 +56,13 @@ export function loadLayer(map, config) {
     // The smoke overlay's own opacity is baked into SMOKE_IMAGE's pixels server-side
     // (Volcano Properties' smoke_opacity setting) -- this raster-opacity is a fixed
     // constant, matching air_quality.js's own hardcoded 0.85, not a second
-    // client-side opacity control.
+    // client-side opacity control. Legend keys render entirely client-side (see
+    // _legend.js's module docstring) -- so2VolcanicKeySpec reuses air_quality.js's
+    // own so2_volcanic LUT/scale so the two stay in lockstep. No opacityFallback:
+    // show_smoke_plume (below) is already this overlay's real show/hide gate,
+    // smoke_opacity isn't a live per-viewer opacity to hide the key on.
+    const smokeLegend = standardLegend(smokeSlotId, (cfg) => so2VolcanicKeySpec(cfg.so2_min));
+
     const addSmokeLayer = (cfg) => {
         if (map.getSource(smokeSourceId)) return;
         map.addSource(smokeSourceId, {
@@ -66,28 +72,20 @@ export function loadLayer(map, config) {
             id: smokeLayerId, type: 'raster', source: smokeSourceId,
             paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 },
         });
-        addSmokeLegend(cfg);
-    };
-
-    const addSmokeLegend = (cfg) => {
-        showLegend(
-            smokeSlotId,
-            `${window.MAP_UI}/${keyFilename(SMOKE_IMAGE)}?t=${Date.now()}`,
-            opacityUniform({ opacity: cfg.smoke_opacity }, 0.6),
-        );
+        smokeLegend.addLegend(cfg);
     };
 
     const removeSmokeLayer = () => {
         if (map.getLayer(smokeLayerId))   map.removeLayer(smokeLayerId);
         if (map.getSource(smokeSourceId)) map.removeSource(smokeSourceId);
-        removeLegend(smokeSlotId);
+        smokeLegend.removeLegend();
     };
 
     const syncSmokeLayer = (cfg) => {
         if (!cfg.show_smoke_plume) { removeSmokeLayer(); return; }
         if (!map.getSource(smokeSourceId)) { addSmokeLayer(cfg); return; }
         map.getSource(smokeSourceId)?.updateImage({ url: `${window.MAP_UI}/${SMOKE_IMAGE}?t=${Date.now()}` });
-        addSmokeLegend(cfg);
+        smokeLegend.addLegend(cfg);
     };
 
     const mount = async (cfg) => {

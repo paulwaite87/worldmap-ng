@@ -66,6 +66,13 @@ function keySpecFor(cfg, volcanoesCfg) {
     };
 }
 
+// volcanoes.js's smoke-plume legend needs this exact same so2_volcanic scale --
+// exported so both stay in lockstep rather than risking drift from two independent
+// copies of the same LUT/vmin/vmax/title.
+export function so2VolcanicKeySpec(so2Min) {
+    return keySpecFor({ variable: 'so2_volcanic' }, { so2_min: so2Min });
+}
+
 export function loadLayer(map, config) {
     const sourceId = 'air-quality-source';
     const layerId  = 'air-quality-layer';

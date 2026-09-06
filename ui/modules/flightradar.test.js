@@ -663,6 +663,11 @@ describe('deriveDisplayState', () => {
     // A 3600kt due-north flight covers exactly 1 degree of latitude in 60s.
     const ELAPSED_60S = 60;
 
+    // receivedAt=1000ms; now = 1000ms + 60s (in ms) -> elapsed = exactly 60s -- for the
+    // buildFeatureCollection-level tests below (unlike deriveDisplayState itself, that
+    // function takes an absolute `now` epoch-ms timestamp, not an elapsed-seconds count).
+    const NOW_AFTER_60S = 1000 + 60 * 1000;
+
     test('no prior display state (a genuine first sighting) renders the raw dead-reckoned target directly', () => {
         const state = deriveDisplayState(movingRec(), ELAPSED_60S, undefined, 1.0, 0.6);
         expect(state.pos).toEqual({ lat: 1, lon: 0 });

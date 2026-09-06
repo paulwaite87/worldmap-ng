@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from atmos_gl.lib.cds_client import (
-    resolve_ewds_credentials,
     retrieve_and_unzip,
     retrieve_with_fallback,
 )
@@ -260,41 +259,3 @@ def test_retrieve_with_fallback_unzip_false_cleans_up_a_stale_tmp_from_an_earlie
     assert not os.path.exists(stale_tmp)
     assert glob.glob(f"{dest}.*.tmp") == []  # no leftover tmp of any kind
 
-
-# ---- resolve_ewds_credentials --------------------------------------------------
-
-
-def test_resolve_ewds_credentials_returns_none_without_glofas_api_key(monkeypatch):
-    monkeypatch.delenv("GLOFAS_API_KEY", raising=False)
-    result = resolve_ewds_credentials(lambda key: "https://ewds.example/api", "test")
-    assert result is None
-
-
-def test_resolve_ewds_credentials_returns_none_without_glofas_ews_datasource(monkeypatch):
-    monkeypatch.setenv("GLOFAS_API_KEY", "some-key")
-    result = resolve_ewds_credentials(lambda key: "", "test")
-    assert result is None
-
-
-def test_resolve_ewds_credentials_does_not_fall_back_to_cdsapi_key(monkeypatch):
-    """EWDS is a separate credential from ADS -- confirmed live during issue #371's
-    spike (GLOFAS_API_KEY does not reuse CDSAPI_KEY). CDSAPI_KEY being set must never
-    satisfy this resolver on its own."""
-    monkeypatch.delenv("GLOFAS_API_KEY", raising=False)
-    monkeypatch.setenv("CDSAPI_KEY", "an-ads-key")
-    result = resolve_ewds_credentials(lambda key: "https://ewds.example/api", "test")
-    assert result is None
-
-
-def test_resolve_ewds_credentials_returns_base_url_and_key_when_both_configured(monkeypatch):
-    monkeypatch.setenv("GLOFAS_API_KEY", "the-glofas-key")
-    seen_keys = []
-
-    def datasource_url(key):
-        seen_keys.append(key)
-        return "https://ewds.climate.copernicus.eu/api"
-
-    result = resolve_ewds_credentials(datasource_url, "test")
-
-    assert result == ("https://ewds.climate.copernicus.eu/api", "the-glofas-key")
-    assert seen_keys == ["glofas_ews"]

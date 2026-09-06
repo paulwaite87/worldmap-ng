@@ -33,25 +33,6 @@ def resolve_cds_credentials(datasource_url_fn, label: str):
     return base_url, api_key
 
 
-def resolve_ewds_credentials(datasource_url_fn, label: str):
-    """(base_url, api_key) for a request against Copernicus's EWDS (Early Warning Data
-    Store, home of the GloFAS forecast dataset), or None (having logged why) if either
-    GLOFAS_API_KEY or the glofas_ews datasource isn't configured.
-
-    EWDS is a SEPARATE host/credential from ADS (confirmed live during issue #371's
-    spike -- GLOFAS_API_KEY does not reuse CDSAPI_KEY), hence its own resolver rather
-    than a parameterised version of resolve_cds_credentials above."""
-    api_key = os.environ.get("GLOFAS_API_KEY", "").strip()
-    if not api_key:
-        logger.warning(f"{label}: no GLOFAS_API_KEY configured; skipping.")
-        return None
-    base_url = datasource_url_fn("glofas_ews")
-    if not base_url:
-        logger.warning(f"{label}: no 'glofas_ews' datasource configured; skipping.")
-        return None
-    return base_url, api_key
-
-
 def retrieve_with_timeout(client, dataset: str, request: dict, target: str, timeout_s: float):
     """Run client.retrieve() (cdsapi's own blocking submit-then-poll-then-download) in
     a worker thread, bounded by timeout_s. Raises concurrent.futures.TimeoutError if

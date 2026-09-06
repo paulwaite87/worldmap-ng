@@ -1,485 +1,278 @@
 #!/usr/bin/env python3
-"""FloodRiskLiveCollector: GloFAS ensemble discharge forecast classified per grid
-cell against ETH's Gumbel-fit return-period thresholds (see issue #371).
-
-Mirrors test_greenhouse_gases_forecast_collector.py's seam (mock the cdsapi.Client
-boundary, assert on cache/store calls, not on real network access) for the
-credential/search-fallback tests, and test_field_collector_base_data_status.py's
-bare-collector construction for data_status(). _process_and_store_one_hour is
-exercised against tiny REAL netCDF fixtures (written via xarray) since its job is
-genuinely parsing/regridding/classifying array data, not just orchestrating a fetch.
-
-collect() fetches/stores each of GLOFAS_LEADTIME_HOURS as its own request (one
-netCDF per hour, not all 7 in one job) -- see the collector's own docstring for why.
+"""FloodRiskLiveCollector: NASA LANCE MODIS flood product ("Observed Current
+Inundation"), rebuilt from cached tiles every cycle has_new_data() finds a
+changed or newly-expired tile. A CollectorBase subclass (file-cache family, like
+its Historical sibling) -- see test_flood_risk_historical_collector.py for the
+sibling test pattern this mirrors, and collectors/flood_risk.py's module
+docstring for why this replaced the original GloFAS-forecast design.
 """
-import concurrent.futures
 import os
-from datetime import datetime, timedelta, timezone
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
-import xarray as xr
+import rasterio
+from rasterio import Affine
 
 from atmos_gl.collectors.flood_risk import FloodRiskLiveCollector
 from atmos_gl.lib.flood_risk import (
-    GLOFAS_LEADTIME_HOURS,
-    GLOFAS_SEARCH_DAYS,
-    gumbel_threshold_discharge,
-    glofas_forecast_cache_path,
-    load_gumbel_fit,
+    load_jrc_hazard_mosaic,
+    modis_flood_mosaic_cache_path,
+    modis_flood_tile_bounds,
+    modis_flood_tile_cache_path,
+    tile_dst_window,
 )
 
 
-def make_bare_live_collector(
-    workdir=".", api_key="glofas-secret", url="https://ewds.example/api", monkeypatch=None,
-):
-    # collect()'s self-gate (see its own comment) lives on the CLASS, not the instance,
-    # since production relies on it surviving fresh-instance construction every cycle --
-    # reset it here so one test's attempt doesn't silently gate the next.
-    FloodRiskLiveCollector._last_attempt_monotonic = None
+def make_bare_live_collector(settings=None, workdir="."):
     c = FloodRiskLiveCollector.__new__(FloodRiskLiveCollector)
-    c.settings = {}
-    c.store = MagicMock()
-    c.store.field_exists.return_value = False
-    # Cold start (no resumable run) by default -- _resume_run_date_str's own tests
-    # cover the resume path directly.
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = None
+    c.settings = settings or {}
 
     def fake_get_setting(section, key, default=None):
-        if section == "data_collector" and key == "datasources":
-            return {"glofas_ews": url}
         if section == "common" and key == "workdir":
             return workdir
         return default
 
     c.config = MagicMock()
     c.config.get_setting.side_effect = fake_get_setting
-    if api_key is not None:
-        monkeypatch.setenv("GLOFAS_API_KEY", api_key)
-    else:
-        monkeypatch.delenv("GLOFAS_API_KEY", raising=False)
     return c
 
 
-# ---- base_url() -------------------------------------------------------------------
-
-
-def test_base_url_resolves_from_data_collector_datasources_not_own_settings_section():
-    """FieldCollectorBase's default base_url() reads self.settings["datasources"],
-    which assumes settings_section == "data_collector" -- not true here (settings_section
-    is "flood_risk"). drain_backfill() calls base_url() directly, so this must resolve
-    correctly regardless."""
-    c = FloodRiskLiveCollector.__new__(FloodRiskLiveCollector)
-    c.settings = {"enabled": True}  # the "flood_risk" section -- no "datasources" key
-    c.config = MagicMock()
-    c.config.get_setting.side_effect = lambda section, key, default=None: (
-        {"glofas_ews": "https://ewds.example/api/"} if (section, key) == ("data_collector", "datasources") else default
+def _write_tile_fixture(path, values, bounds):
+    lon_min, lat_min, lon_max, lat_max = bounds
+    height, width = values.shape
+    transform = Affine(
+        (lon_max - lon_min) / width, 0.0, lon_min,
+        0.0, -(lat_max - lat_min) / height, lat_max,
     )
-
-    assert c.base_url() == "https://ewds.example/api"  # trailing slash stripped
-
-
-def test_base_url_returns_none_when_glofas_ews_not_configured():
-    c = FloodRiskLiveCollector.__new__(FloodRiskLiveCollector)
-    c.settings = {"enabled": True}
-    c.config = MagicMock()
-    c.config.get_setting.return_value = {}
-
-    assert c.base_url() is None
+    with rasterio.open(
+        path, "w", driver="GTiff", height=height, width=width, count=1,
+        dtype="uint8", crs="EPSG:4326", transform=transform, nodata=255,
+    ) as dst:
+        dst.write(values, 1)
 
 
-# ---- collect(): credential gating -----------------------------------------------
+def _cache_tile(h, v, value, filename):
+    """Write a fully-cached tile (GeoTIFF + .name sidecar) directly, bypassing
+    ensure_modis_flood_tile_cached, for tests that need a pre-existing cache
+    without exercising the download path. Always includes an adjacent "surface
+    water" (1) pixel alongside `value` -- irrelevant unless value is
+    MODIS_FLOOD_VALUE (3), in which case resample_modis_flood_tile_onto_grid's
+    water-adjacency filter (see MODIS_FLOOD_WATER_ADJACENCY_PX) would otherwise
+    always drop it."""
+    tile_path = modis_flood_tile_cache_path(h, v)
+    os.makedirs(os.path.dirname(tile_path), exist_ok=True)
+    _write_tile_fixture(
+        tile_path, np.array([[value, 1]], dtype=np.uint8), modis_flood_tile_bounds(h, v)
+    )
+    with open(tile_path + ".name", "w") as f:
+        f.write(filename)
+    return tile_path
 
 
-def test_collect_skips_without_raising_when_no_api_key(tmp_path, monkeypatch):
-    c = make_bare_live_collector(workdir=str(tmp_path), api_key=None, monkeypatch=monkeypatch)
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls:
-        c.collect(ctx=None)
-
-    mock_client_cls.assert_not_called()
-    c.store.store_field.assert_not_called()
-
-
-def test_collect_skips_without_raising_when_no_glofas_ews_datasource(tmp_path, monkeypatch):
-    c = make_bare_live_collector(workdir=str(tmp_path), url="", monkeypatch=monkeypatch)
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls:
-        c.collect(ctx=None)
-
-    mock_client_cls.assert_not_called()
+_TILE_A = {
+    "h": 19, "v": 6, "filename": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.111.tif",
+    "download_url": "https://example.test/h19v06.tif",
+}
+_TILE_B = {
+    "h": 20, "v": 6, "filename": "MCDWD_L3_F1C_NRT.A2026242.h20v06.061.111.tif",
+    "download_url": "https://example.test/h20v06.tif",
+}
 
 
-# ---- collect(): search-fallback + gives-up shape (mirrors CamsGhgForecastCollector) --
+# ---- source_url ---------------------------------------------------------------
 
 
-def test_collect_falls_back_to_an_earlier_date_when_todays_run_is_not_yet_published(
-    tmp_path, monkeypatch
-):
-    """The FIRST leadtime hour's search-fallback shape: an unavailable freshest
-    candidate date is skipped in favour of an earlier one."""
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    seen_dates = []
+def test_source_url_is_the_hardcoded_lance_endpoint_not_a_config_datasource():
+    c = make_bare_live_collector()
+    assert c.source_url() == "https://nrt3.modaps.eosdis.nasa.gov"
 
-    def fake_retrieve(dataset, request, target):
-        seen_dates.append(f"{request['year'][0]}{request['month'][0]}{request['day'][0]}")
-        if len(seen_dates) == 1:
-            raise RuntimeError("400 Client Error: today's run not published yet")
-        # Bare (unarchived) netCDF -- just needs to exist for retrieve_with_fallback's
-        # unzip=False path; _process_and_store_one_hour's own parsing is tested
-        # separately below.
-        with open(target, "wb") as f:
-            f.write(b"placeholder-bytes")
 
-    mock_client = MagicMock()
-    mock_client.retrieve.side_effect = fake_retrieve
+# ---- has_new_data ---------------------------------------------------------------
+
+
+def test_has_new_data_is_false_when_no_token_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("EARTHDATA_TOKEN", raising=False)
+    c = make_bare_live_collector(workdir=str(tmp_path))
+
+    with patch("atmos_gl.collectors.flood_risk.fetch_modis_flood_listing") as mock_fetch:
+        assert c.has_new_data() is False
+
+    mock_fetch.assert_not_called()
+
+
+def test_has_new_data_is_false_when_listing_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
 
     with patch(
-        "atmos_gl.collectors.flood_risk.cdsapi.Client", return_value=mock_client
-    ), patch.object(
-        FloodRiskLiveCollector, "_process_and_store_one_hour",
-        return_value=("20260828", 24),
-    ) as mock_process, patch(
-        "atmos_gl.collectors.flood_risk.ensure_gumbel_fit_cached",
-        return_value="/fake/gumbel-fit.nc",
-    ), patch(
-        "atmos_gl.collectors.flood_risk.load_gumbel_fit",
-        return_value=(None, None, None, None),
+        "atmos_gl.collectors.flood_risk.fetch_modis_flood_listing",
+        side_effect=Exception("network down"),
     ):
-        c.collect(ctx=None)
-
-    assert seen_dates[1] < seen_dates[0]  # tried an earlier date second, for hour[0]
-    # Only the first leadtime hour needed the candidate search; once locked in, the
-    # remaining 6 hours each fetch a single, already-known date -- one retrieve() per
-    # hour (7 total) plus the one extra failed candidate for the first hour.
-    assert mock_client.retrieve.call_count == len(GLOFAS_LEADTIME_HOURS) + 1
-    assert mock_process.call_count == len(GLOFAS_LEADTIME_HOURS)
-    dest_arg = mock_process.call_args_list[0][0][0]
-    assert not os.path.exists(dest_arg)  # cleaned up after processing
+        assert c.has_new_data() is False
 
 
-def test_collect_gives_up_gracefully_when_no_recent_run_is_available(tmp_path, monkeypatch):
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    mock_client = MagicMock()
-    mock_client.retrieve.side_effect = RuntimeError("400 Client Error")
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client", return_value=mock_client):
-        c.collect(ctx=None)  # must not raise
-
-    # Only the first leadtime hour's candidate search runs; every candidate fails, so
-    # collect() stops there rather than trying the remaining hours.
-    assert mock_client.retrieve.call_count == GLOFAS_SEARCH_DAYS
-    assert not os.path.exists(glofas_forecast_cache_path(str(tmp_path), GLOFAS_LEADTIME_HOURS[0]))
-    c.store.store_field.assert_not_called()
-
-
-def test_collect_returns_gracefully_without_raising_on_timeout(tmp_path, monkeypatch):
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client"), patch(
-        "atmos_gl.lib.cds_client.retrieve_with_timeout",
-        side_effect=concurrent.futures.TimeoutError,
-    ):
-        c.collect(ctx=None)  # must not raise
-
-    assert not os.path.exists(glofas_forecast_cache_path(str(tmp_path), GLOFAS_LEADTIME_HOURS[0]))
-
-
-def test_collect_skips_the_fetch_when_the_latest_run_is_already_fully_stored(
-    tmp_path, monkeypatch
-):
-    """GloFAS publishes once per day -- collect() must not re-fetch a run whose every
-    leadtime hour is already in the field catalog."""
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    # Recent enough (well within GLOFAS_SEARCH_DAYS) that _resume_run_date_str locks
-    # onto it rather than treating it as stale.
-    recent_date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = {
-        "run_date": recent_date_str, "run_id": "00",
-        "hours": [int(h) for h in GLOFAS_LEADTIME_HOURS],
-    }
-    c.store.field_exists.return_value = True  # every leadtime hour already stored
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls:
-        c.collect(ctx=None)
-
-    mock_client_cls.assert_not_called()
-
-
-def test_collect_resumes_only_the_missing_hours_of_a_partially_stored_run(
-    tmp_path, monkeypatch
-):
-    """A run interrupted mid-fetch (connection drop, OOM, restart) must resume on
-    exactly the hours still missing, without re-searching candidate dates or
-    re-fetching hours already safely in the catalog."""
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    recent_date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = {
-        "run_date": recent_date_str, "run_id": "00", "hours": [24],
-    }
-    stored_hours = {24}
-    c.store.field_exists.side_effect = (
-        lambda run_date, run_id, fhour, product: fhour in stored_hours
-    )
-
-    def fake_retrieve(dataset, request, target):
-        with open(target, "wb") as f:
-            f.write(b"placeholder-bytes")
-
-    mock_client = MagicMock()
-    mock_client.retrieve.side_effect = fake_retrieve
+def test_has_new_data_is_true_when_a_tile_is_new(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
 
     with patch(
-        "atmos_gl.collectors.flood_risk.cdsapi.Client", return_value=mock_client
-    ), patch.object(
-        FloodRiskLiveCollector, "_process_and_store_one_hour",
-        return_value=(recent_date_str, 48),
-    ), patch(
-        "atmos_gl.collectors.flood_risk.ensure_gumbel_fit_cached",
-        return_value="/fake/gumbel-fit.nc",
-    ), patch(
-        "atmos_gl.collectors.flood_risk.load_gumbel_fit",
-        return_value=(None, None, None, None),
+        "atmos_gl.collectors.flood_risk.fetch_modis_flood_listing", return_value=[_TILE_A]
     ):
-        c.collect(ctx=None)
+        assert c.has_new_data() is True
 
-    # One request per still-missing hour (6 of the 7), each for the ALREADY-KNOWN
-    # date -- no candidate-date search re-run.
-    assert mock_client.retrieve.call_count == len(GLOFAS_LEADTIME_HOURS) - 1
-    for call in mock_client.retrieve.call_args_list:
-        request = call[0][1]
-        assert (
-            f"{request['year'][0]}{request['month'][0]}{request['day'][0]}"
-            == recent_date_str
+    assert c._listing == [_TILE_A]
+
+
+def test_has_new_data_is_false_when_every_tile_is_already_current(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    _cache_tile(_TILE_A["h"], _TILE_A["v"], 0, _TILE_A["filename"])
+
+    with patch(
+        "atmos_gl.collectors.flood_risk.fetch_modis_flood_listing", return_value=[_TILE_A]
+    ):
+        assert c.has_new_data() is False
+
+
+def test_has_new_data_is_true_when_pruning_removed_a_stale_tile(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    from atmos_gl.lib.flood_risk import MODIS_FLOOD_STALE_S
+
+    tile_path = _cache_tile(_TILE_A["h"], _TILE_A["v"], 0, _TILE_A["filename"])
+    old = time.time() - (MODIS_FLOOD_STALE_S + 3600)
+    os.utime(tile_path, (old, old))
+    os.utime(tile_path + ".name", (old, old))
+
+    with patch("atmos_gl.collectors.flood_risk.fetch_modis_flood_listing", return_value=[]):
+        assert c.has_new_data() is True
+
+    assert not os.path.exists(tile_path)
+
+
+# ---- collect ---------------------------------------------------------------
+
+
+def test_collect_returns_gracefully_without_a_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("EARTHDATA_TOKEN", raising=False)
+    c = make_bare_live_collector(workdir=str(tmp_path))
+
+    c.collect()  # must not raise
+
+    assert not os.path.exists(modis_flood_mosaic_cache_path(str(tmp_path)))
+
+
+def test_collect_downloads_changed_tiles_and_rebuilds_the_mosaic(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    c._listing = [_TILE_A, _TILE_B]
+
+    fixture_bytes = {}
+    # 3 = Flood (with an adjacent water pixel -- see MODIS_FLOOD_WATER_ADJACENCY_PX),
+    # 0 = no water
+    for tile, pixel_row in ((_TILE_A, [3, 1]), (_TILE_B, [0, 0])):
+        p = tmp_path / f"src_{tile['h']}_{tile['v']}.tif"
+        _write_tile_fixture(
+            str(p), np.array([pixel_row], dtype=np.uint8),
+            modis_flood_tile_bounds(tile["h"], tile["v"]),
         )
+        fixture_bytes[tile["download_url"]] = p.read_bytes()
+
+    def fake_download(url, headers=None):
+        return fixture_bytes[url]
+
+    with patch("atmos_gl.lib.gfs.download_whole", side_effect=fake_download):
+        c.collect()
+
+    dest = modis_flood_mosaic_cache_path(str(tmp_path))
+    assert os.path.exists(dest)
+    band, _lat, _lon = load_jrc_hazard_mosaic(dest)
+    row0, row1, col0, col1 = tile_dst_window(modis_flood_tile_bounds(_TILE_A["h"], _TILE_A["v"]))
+    col_mid = col0 + (col1 - col0) // 2
+    # left half overlaps the source's Flood pixel -> binarized to 1; right half
+    # overlaps the adjacent water pixel itself, which isn't flood -> 0
+    assert (band[row0:row1, col0:col_mid] == 1).all()
+    assert (band[row0:row1, col_mid:col1] == 0).all()
+    row0, row1, col0, col1 = tile_dst_window(modis_flood_tile_bounds(_TILE_B["h"], _TILE_B["v"]))
+    assert (band[row0:row1, col0:col1] == 0).all()
 
 
-# ---- collect(): self-gate on flood_risk.runs_per_day -----------------------------
+def test_collect_skips_a_tile_thats_already_current_but_still_mosaics_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    c._listing = [_TILE_A]
+    _cache_tile(_TILE_A["h"], _TILE_A["v"], 3, _TILE_A["filename"])
+
+    with patch("atmos_gl.lib.gfs.download_whole") as mock_download:
+        c.collect()
+
+    mock_download.assert_not_called()
+    dest = modis_flood_mosaic_cache_path(str(tmp_path))
+    assert os.path.exists(dest)
+    band, _lat, _lon = load_jrc_hazard_mosaic(dest)
+    row0, row1, col0, col1 = tile_dst_window(modis_flood_tile_bounds(_TILE_A["h"], _TILE_A["v"]))
+    col_mid = col0 + (col1 - col0) // 2
+    assert (band[row0:row1, col0:col_mid] == 1).all()  # Flood pixel half
 
 
-def test_collect_skips_when_called_again_before_the_configured_period_has_elapsed(
-    tmp_path, monkeypatch
-):
-    """FieldCollectorDriver has no is_stale() cadence check of its own (unlike
-    EventFeedDriver) -- see collect()'s own comment -- so this collector must self-gate
-    on flood_risk.runs_per_day, or a slow/failing EWDS request gets retried every single
-    service cycle instead of waiting out its own period (confirmed live on prod: repeated
-    requests fired every ~15-30min cycle, racing/aborting each other's downloads)."""
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    c.settings = {"runs_per_day": 24}  # period_s = 3600
+def test_collect_keeps_a_tiles_previous_content_when_its_refresh_fails(tmp_path, monkeypatch):
+    """A tile that fails to download this cycle must still contribute its
+    last-known-good cached content to the mosaic, not be dropped -- same
+    resilience JRC's per-tile cache already provides for Historical mode."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    stale_filename = "MCDWD_L3_F1C_NRT.A2026241.h19v06.061.000.tif"
+    c._listing = [{**_TILE_A, "filename": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.999.tif"}]
+    _cache_tile(_TILE_A["h"], _TILE_A["v"], 3, stale_filename)
 
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls:
-        c.collect(ctx=None)
-    assert mock_client_cls.call_count == 1
+    with patch("atmos_gl.lib.gfs.download_whole", side_effect=Exception("network down")):
+        c.collect()
 
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls2:
-        c.collect(ctx=None)  # immediately again -- must be gated, not re-attempted
-    mock_client_cls2.assert_not_called()
-
-
-def test_collect_retries_once_the_configured_period_has_elapsed(tmp_path, monkeypatch):
-    c = make_bare_live_collector(workdir=str(tmp_path), monkeypatch=monkeypatch)
-    c.settings = {"runs_per_day": 24}  # period_s = 3600
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls:
-        c.collect(ctx=None)
-    assert mock_client_cls.call_count == 1
-
-    FloodRiskLiveCollector._last_attempt_monotonic -= 3601  # simulate period_s elapsed
-
-    with patch("atmos_gl.collectors.flood_risk.cdsapi.Client") as mock_client_cls2:
-        c.collect(ctx=None)
-    assert mock_client_cls2.call_count == 1
+    dest = modis_flood_mosaic_cache_path(str(tmp_path))
+    assert os.path.exists(dest)
+    band, _lat, _lon = load_jrc_hazard_mosaic(dest)
+    row0, row1, col0, col1 = tile_dst_window(modis_flood_tile_bounds(_TILE_A["h"], _TILE_A["v"]))
+    col_mid = col0 + (col1 - col0) // 2
+    assert (band[row0:row1, col0:col_mid] == 1).all()  # still the OLD (flood=3) content
 
 
-# ---- _process_and_store_one_hour: real (tiny) netCDF fixtures -------------------
+def test_collect_writes_no_mosaic_when_nothing_has_ever_been_cached(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    c._listing = [_TILE_A]
+
+    with patch("atmos_gl.lib.gfs.download_whole", side_effect=Exception("network down")):
+        c.collect()
+
+    assert not os.path.exists(modis_flood_mosaic_cache_path(str(tmp_path)))
 
 
-def _write_forecast_fixture(
-    path, run_date, leadtime_hour, lat, lon, ensemble, drop_forecast_period_dim=False
-):
-    """One leadtime hour's (n_members, len(lat), len(lon)) ensemble, matching
-    cems-glofas-forecast's real dim order/names for a single-leadtime_hour request
-    (confirmed live during issue #371's spike for the multi-leadtime shape: number,
-    forecast_period, forecast_reference_time, latitude, longitude).
+def test_collect_refetches_the_listing_when_has_new_data_was_not_called_first(tmp_path, monkeypatch):
+    """collect() must not assume has_new_data() always ran immediately before it
+    (true in production via EventFeedDriver, but not necessarily of a direct
+    call, e.g. in a test) -- it should refetch rather than silently do nothing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EARTHDATA_TOKEN", "tok")
+    c = make_bare_live_collector(workdir=str(tmp_path))
+    assert not hasattr(c, "_listing")
 
-    `drop_forecast_period_dim` covers the other plausible shape a single-value
-    leadtime_hour request could come back as -- forecast_period present only as a
-    scalar coordinate, not a dimension -- since _process_and_store_one_hour must
-    handle both (see its own "if 'forecast_period' in ds.dims" guard)."""
-    n_members = ensemble.shape[0]
-    if drop_forecast_period_dim:
-        data = ensemble[:, np.newaxis, :, :]
-        dims = ("number", "forecast_reference_time", "latitude", "longitude")
-        coords = {
-            "number": np.arange(1, n_members + 1),
-            "forecast_period": np.timedelta64(leadtime_hour, "h"),
-            "forecast_reference_time": [np.datetime64(run_date)],
-            "latitude": np.asarray(lat, dtype=np.float64),
-            "longitude": np.asarray(lon, dtype=np.float64),
-        }
-    else:
-        data = ensemble[:, np.newaxis, np.newaxis, :, :]
-        dims = ("number", "forecast_period", "forecast_reference_time", "latitude", "longitude")
-        coords = {
-            "number": np.arange(1, n_members + 1),
-            "forecast_period": [np.timedelta64(leadtime_hour, "h")],
-            "forecast_reference_time": [np.datetime64(run_date)],
-            "latitude": np.asarray(lat, dtype=np.float64),
-            "longitude": np.asarray(lon, dtype=np.float64),
-        }
-    ds = xr.Dataset({"dis24": (dims, data)}, coords=coords)
-    ds.to_netcdf(path)
-
-
-def _write_gumbel_fixture(path, lat, lon, loc_value, scale_value):
-    loc = np.full((len(lat), len(lon)), loc_value, dtype=np.float64)
-    scale = np.full((len(lat), len(lon)), scale_value, dtype=np.float64)
-    ds = xr.Dataset(
-        {
-            "loc": (("latitude", "longitude"), loc),
-            "scale": (("latitude", "longitude"), scale),
-        },
-        coords={
-            "latitude": np.asarray(lat, dtype=np.float64),
-            "longitude": np.asarray(lon, dtype=np.float64),
-        },
-    )
-    ds.to_netcdf(path)
-
-
-@pytest.mark.parametrize("drop_forecast_period_dim", [False, True])
-def test_process_and_store_one_hour_classifies_each_cell_and_stores_the_field(
-    tmp_path, drop_forecast_period_dim
-):
-    lat, lon = [20.0, 10.0], [30.0, 40.0]  # descending lat, matching real GloFAS grids
-    loc, scale = 500.0, 100.0
-    q20 = gumbel_threshold_discharge(20.0, loc, scale)
-    q2 = gumbel_threshold_discharge(2.0, loc, scale)
-
-    # cell (0,0): every member well above the 20yr threshold -> band 3
-    # every other cell: every member well below even the 2yr threshold -> band 0
-    ensemble = np.full((10, 2, 2), q2 - 1000.0)
-    ensemble[:, 0, 0] = q20 + 1000.0
-
-    forecast_path = str(tmp_path / "forecast_f024.nc")
-    gumbel_path = str(tmp_path / "gumbel.nc")
-    _write_forecast_fixture(
-        forecast_path, run_date="2026-08-29", leadtime_hour=24,
-        lat=lat, lon=lon, ensemble=ensemble,
-        drop_forecast_period_dim=drop_forecast_period_dim,
-    )
-    _write_gumbel_fixture(gumbel_path, lat=lat, lon=lon, loc_value=loc, scale_value=scale)
-    loc_native, scale_native, gumbel_lat, gumbel_lon = load_gumbel_fit(gumbel_path)
-
-    c = FloodRiskLiveCollector.__new__(FloodRiskLiveCollector)
-    c.store = MagicMock()
-
-    run_date_str, fhour = c._process_and_store_one_hour(
-        forecast_path, loc_native, scale_native, gumbel_lat, gumbel_lon
+    tif_path = tmp_path / "src.tif"
+    _write_tile_fixture(
+        str(tif_path), np.array([[3, 1]], dtype=np.uint8),
+        modis_flood_tile_bounds(_TILE_A["h"], _TILE_A["v"]),
     )
 
-    assert run_date_str == "20260829"
-    assert fhour == 24
-    c.store.store_field.assert_called_once()
-    call_run_date_str, run_id, call_fhour, product, unpacked, valid_time = (
-        c.store.store_field.call_args[0]
-    )
+    with patch(
+        "atmos_gl.collectors.flood_risk.fetch_modis_flood_listing", return_value=[_TILE_A]
+    ), patch("atmos_gl.lib.gfs.download_whole", return_value=tif_path.read_bytes()):
+        c.collect()
 
-    assert call_run_date_str == "20260829"
-    assert run_id == "00"
-    assert call_fhour == 24
-    assert product == "flood_risk_live"
-    assert unpacked["values"][0, 0] == 3  # 20yr band
-    assert unpacked["values"][1, 1] == 0  # below every threshold
-    assert unpacked["values2"][0, 0] == pytest.approx(1.0)  # 100% of members exceed
-    assert valid_time == datetime(2026, 8, 29, tzinfo=timezone.utc) + timedelta(hours=24)
-
-
-# ---- data_status() ---------------------------------------------------------------
-
-
-def make_bare_data_status_collector(settings=None):
-    c = FloodRiskLiveCollector.__new__(FloodRiskLiveCollector)
-    c.status_name = "flood_risk_live"
-    c.settings = settings or {"enabled": True}
-    c.process_status_adapter = MagicMock()
-    c.store = MagicMock()
-    return c
-
-
-def test_data_status_no_catalog_data_yet():
-    c = make_bare_data_status_collector()
-    c.process_status_adapter.get_process_status.return_value = None
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = None
-
-    result = c.data_status()
-
-    assert result["name"] == "flood_risk_live"
-    assert result["percent"] == 0.0
-    assert result["last_updated"] is None
-
-
-def test_data_status_percent_reflects_fraction_of_the_7_expected_leadtime_days():
-    c = make_bare_data_status_collector()
-    c.process_status_adapter.get_process_status.return_value = {
-        "last_updated": None, "last_error": None,
-    }
-    # Only 3 of the 7 expected leadtime days (24, 48, 72) present.
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = {
-        "run_date": "20260829", "run_id": "00", "hours": [24, 48, 72],
-    }
-
-    result = c.data_status()
-
-    # build_status() rounds percent to 1 decimal place.
-    assert result["percent"] == pytest.approx(round(300.0 / 7.0, 1))
-    assert "3/7 leadtime day(s)" in result["detail"]
-
-
-def test_data_status_full_coverage_reports_100_percent():
-    c = make_bare_data_status_collector()
-    c.process_status_adapter.get_process_status.return_value = {
-        "last_updated": None, "last_error": None,
-    }
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = {
-        "run_date": "20260829", "run_id": "00",
-        "hours": [int(h) for h in GLOFAS_LEADTIME_HOURS],
-    }
-
-    result = c.data_status()
-
-    assert result["percent"] == 100.0
-
-
-def test_data_status_last_error_takes_priority_over_computed_detail():
-    c = make_bare_data_status_collector()
-    c.process_status_adapter.get_process_status.return_value = {
-        "last_updated": None, "last_error": "EWDS unreachable",
-    }
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = None
-
-    result = c.data_status()
-
-    assert result["detail"] == "EWDS unreachable"
-
-
-def test_data_status_next_update_ignores_the_frontend_show_toggle():
-    """Regression guard: settings_section is overridden to the shared "flood_risk"
-    section (same convention as CACHE_COLLECTORS), so self.enabled here reflects the
-    layer's frontend Show-toggle, not a real collection kill-switch -- _collect_fields()
-    drives this collector every cycle unconditionally of it. next_update must stay
-    populated (matching freshness_data_status()'s next_update_respects_enabled=False
-    default) even while the toggle is off, while the returned "enabled" field still
-    correctly reports the real flag value."""
-    c = make_bare_data_status_collector(settings={"enabled": False})
-    c.process_status_adapter.get_process_status.return_value = {
-        "last_updated": None, "last_error": None,
-    }
-    c.store.field_catalog_adapter.get_latest_run_hours.return_value = None
-
-    result = c.data_status()
-
-    assert result["enabled"] is False
-    assert result["next_update"] is not None
+    assert os.path.exists(modis_flood_mosaic_cache_path(str(tmp_path)))

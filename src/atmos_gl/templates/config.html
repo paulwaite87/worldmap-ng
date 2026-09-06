@@ -181,7 +181,7 @@
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" id="flood_risk__enabled">
                                         <label class="form-check-label fw-bold ms-2">Flood Risk</label>
-                                        <div id="key-warn-glofas" class="text-danger small mt-1 d-none">⚠️ Deactivated: Missing GLOFAS_API_KEY (needed for Live mode -- switch to Historical instead).</div>
+                                        <div id="key-warn-glofas" class="text-danger small mt-1 d-none">⚠️ Deactivated: Missing EARTHDATA_TOKEN (needed for Live mode -- switch to Historical instead).</div>
                                     </div>
                                 </div>
                             </div>
@@ -397,10 +397,10 @@
 
             // Mode-specific gate (unlike the always-on cdsapi checks above): Historical
             // mode needs no credential at all, so this only fires when RULE__missing_
-            // glofas_apikey was actually set server-side, i.e. the stored mode is "live"
-            // and GLOFAS_API_KEY is absent (see routes/config.py's _build_config_data).
+            // earthdata_token was actually set server-side, i.e. the stored mode is
+            // "live" and EARTHDATA_TOKEN is absent (see routes/config.py's _build_config_data).
             const floodRiskEnabled = document.getElementById('flood_risk__enabled');
-            if (floodRiskEnabled && data.flood_risk && data.flood_risk.RULE__missing_glofas_apikey) {
+            if (floodRiskEnabled && data.flood_risk && data.flood_risk.RULE__missing_earthdata_token) {
                 floodRiskEnabled.disabled = true; floodRiskEnabled.checked = false;
                 document.getElementById('key-warn-glofas').classList.remove('d-none');
             }

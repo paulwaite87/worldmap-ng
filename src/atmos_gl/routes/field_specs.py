@@ -230,12 +230,14 @@ _GHG_SPECIES = SelectSpec([
 ], personalizable=True)
 
 # Flood Risk's two modes are independently-sourced metrics, not two views of the same
-# data (see issue #371's design grill) -- Live is a daily GloFAS forecast (needs
-# GLOFAS_API_KEY), Historical is a fixed JRC hazard classification (no credential).
+# data (see issue #371's design grill and its follow-up) -- Live is NASA LANCE MODIS
+# observed flooding (needs EARTHDATA_TOKEN; originally a daily GloFAS forecast,
+# abandoned for unfixable OOM/network problems -- see collectors/flood_risk.py's
+# module docstring), Historical is a fixed JRC hazard classification (no credential).
 # Personalizable like every other client-side-only mode toggle (post-#312): switching
 # it just changes which pre-rendered texture this layer's next poll tick fetches.
 _FLOOD_RISK_MODE = SelectSpec([
-    ("live", "Live (GloFAS Forecast)"),
+    ("live", "Live (Observed Inundation)"),
     ("historical", "Historical (JRC 100yr Hazard)"),
 ], personalizable=True)
 

@@ -222,8 +222,33 @@ def tile_dst_window(tile_bounds, step_deg: float = JRC_MOSAIC_GRID_STEP_DEG):
     return row_start, row_start + n, col_start, col_start + n
 
 
-def _reproject_categorical_max(tile_path: str, dst_lat, dst_lon, remap) -> np.ndarray:
-    """Shared rasterio.warp.reproject(Resampling.max) mechanics behind
+def reproject_categorical_max(
+    tile_path: str, dst_lat, dst_lon, remap, *, max_source_pixels: int | None = None
+) -> np.ndarray:
+    """Public (no leading underscore): also used by lib/vegetation_mask.py, whose
+    Zenodo-mirrored MODIS Land Cover GeoTIFF needs the exact same "reproject a
+    single-band categorical raster onto an arbitrary destination grid" mechanics,
+    despite being an unrelated data source -- there's nothing flood/JRC-specific
+    about the mechanics themselves, only about each caller's own `remap` rule.
+
+    max_source_pixels: confirmed live (not a hypothetical) that omitting this reads
+    the WHOLE band 1 into memory before remap/reproject even run -- fine for JRC/
+    MODIS-flood's ~10x10deg tiles (small enough to read wholesale), but the
+    vegetation mask's source is one global ~86400x35849 mosaic (~3.1 billion
+    pixels uncompressed); reading that wholesale OOM-killed the process at ~4GB RSS
+    for even a modest 180x360 destination grid. When set and the source has more
+    pixels than this, the source is read via a decimated `out_shape` (nearest,
+    cheap) chosen so its resolution comfortably exceeds the destination's, rather
+    than reading every native pixel just to immediately discard nearly all of them
+    in the max-resample. This is a real accuracy/memory trade-off: a small
+    burnable patch entirely within pixels skipped by decimation could be missed --
+    acceptable here because the destination grids that pass this are themselves far
+    coarser than the decimated read, and the whole mask is inherently a coarse
+    sanity filter, not a precision boundary. Existing callers omit this and keep
+    doing a full wholesale read (their tiles are always small enough for it to be
+    correct and cheap) -- passing it is opt-in, so their behaviour is unchanged.
+
+    Shared rasterio.warp.reproject(Resampling.max) mechanics behind
     resample_jrc_tile_onto_grid and resample_modis_flood_tile_onto_grid: read band 1
     of a single-band categorical GeoTIFF, apply `remap(source_array, src_dataset)`
     (each caller's own nodata-zeroing / reclassification rule) to the SOURCE array
@@ -233,6 +258,12 @@ def _reproject_categorical_max(tile_path: str, dst_lat, dst_lon, remap) -> np.nd
     detection data must never let a coarse working-resolution cell hide a known
     worst-case within it (same reasoning as coastline.py's _rasterize_land_mask
     uses exact rasterization for categorical land/sea data).
+
+    Assumes dst_lat is north-first (descending) -- every existing caller's mosaic
+    grid is built that way (see build_jrc_mosaic_grid). A caller with an ascending
+    axis must flip it before calling this and flip the result back afterward (see
+    lib/vegetation_mask.py's burnable_vegetation_mask for why that's a real case,
+    not a hypothetical one).
 
     Remapping happens in the SOURCE array rather than via GDAL's src_nodata/
     dst_nodata: confirmed live that GDAL's max/min/average-family resamplers only
@@ -256,11 +287,25 @@ def _reproject_categorical_max(tile_path: str, dst_lat, dst_lon, remap) -> np.nd
     dst = np.zeros((len(dst_lat), len(dst_lon)), dtype=np.uint8)
 
     with rasterio.open(tile_path) as src:
-        source = remap(src.read(1), src)
+        src_transform = src.transform
+        src_pixels = src.width * src.height
+        if max_source_pixels and src_pixels > max_source_pixels:
+            scale = (src_pixels / max_source_pixels) ** 0.5
+            out_width = max(1, int(src.width / scale))
+            out_height = max(1, int(src.height / scale))
+            band = src.read(
+                1, out_shape=(out_height, out_width), resampling=Resampling.nearest
+            )
+            src_transform = src.transform * src.transform.scale(
+                src.width / out_width, src.height / out_height
+            )
+        else:
+            band = src.read(1)
+        source = remap(band, src)
         reproject(
             source=source,
             destination=dst,
-            src_transform=src.transform,
+            src_transform=src_transform,
             src_crs=src.crs,
             dst_transform=dst_transform,
             dst_crs="EPSG:4326",
@@ -274,7 +319,7 @@ def resample_jrc_tile_onto_grid(tile_path: str, dst_lat, dst_lon) -> np.ndarray:
     1-4 + nodata=255) onto the given destination cell-center axes. Native nodata
     (255 -- areas JRC's model didn't classify, not necessarily hazard-free) is
     collapsed to 0 (this mosaic's own default fill for land outside any tile's
-    footprint) before reprojecting -- see _reproject_categorical_max's docstring
+    footprint) before reprojecting -- see reproject_categorical_max's docstring
     for why."""
 
     def _zero_nodata(source, src):
@@ -283,7 +328,7 @@ def resample_jrc_tile_onto_grid(tile_path: str, dst_lat, dst_lon) -> np.ndarray:
             source[source == src.nodata] = 0
         return source
 
-    return _reproject_categorical_max(tile_path, dst_lat, dst_lon, _zero_nodata)
+    return reproject_categorical_max(tile_path, dst_lat, dst_lon, _zero_nodata)
 
 
 def save_jrc_hazard_mosaic(path: str, band: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
@@ -593,7 +638,7 @@ def resample_modis_flood_tile_onto_grid(tile_path: str, dst_lat, dst_lon) -> np.
     becomes 1 only if within MODIS_FLOOD_WATER_ADJACENCY_PX of a "Surface water"
     (value 1) pixel -- see that constant's docstring for why. Everything else (0
     no-water, 1 surface water itself, 2 recurring-flood [not yet populated], 255
-    insufficient data) becomes 0 -- see _reproject_categorical_max's docstring
+    insufficient data) becomes 0 -- see reproject_categorical_max's docstring
     for why remapping happens in the source array."""
 
     def _binarize_flood(source, _src):
@@ -604,4 +649,4 @@ def resample_modis_flood_tile_onto_grid(tile_path: str, dst_lat, dst_lon) -> np.
         nearby_water = binary_dilation(water, iterations=MODIS_FLOOD_WATER_ADJACENCY_PX)
         return (flood & nearby_water).astype(np.uint8)
 
-    return _reproject_categorical_max(tile_path, dst_lat, dst_lon, _binarize_flood)
+    return reproject_categorical_max(tile_path, dst_lat, dst_lon, _binarize_flood)

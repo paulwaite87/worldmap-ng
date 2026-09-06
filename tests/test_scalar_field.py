@@ -185,3 +185,13 @@ def test_resolve_cmap_plain_specs_unaffected():
     u = make_bare_updater(SPECS["temperature"])
     cmap = u._resolve_cmap()
     assert cmap.name == "RdYlBu_r"
+
+
+@pytest.mark.parametrize("key", ["temperature", "ozone", "stormwatch", "pwat"])
+def test_mask_values_defaults_to_a_noop_passthrough(key):
+    """Only FireWeatherUpdater overrides this (issue #390) -- every plain SPECS
+    entry is meaningful everywhere on the globe and must never have its values
+    touched by the hook."""
+    u = make_bare_updater(SPECS[key])
+    values = [[1.0, 2.0], [3.0, 4.0]]
+    assert u._mask_values(values, [0, 1], [0, 1]) is values

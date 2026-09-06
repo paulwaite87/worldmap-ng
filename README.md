@@ -55,7 +55,8 @@ Edit `.env` and fill in your API keys — see [Map Tiles API Key](#map-tiles-api
 [Shipping Data API Key](#shipping-data-api-key),
 [Lightning Strikes API Key](#lightning-strikes-api-key),
 [NASA FIRMS API Key](#nasa-firms-api-key),
-[Copernicus CDS/ADS API Key](#copernicus-cdsads-api-key)
+[Copernicus CDS/ADS API Key](#copernicus-cdsads-api-key),
+[NASA Earthdata Login Token](#nasa-earthdata-login-token)
 
 The map tiles key is MANDATORY for the globe's basemap to render at all. All others 
 are optional (you can enable them later once you have keys).
@@ -212,6 +213,18 @@ Once the key is set (and, for Greenhouse Gases, the licence accepted), select
 `Greenhouse Gases` in the Atmos GL Configurator's `Show` tab under the `Climate`
 group, and/or `Air Quality` under the `Events` group.
 
+#### NASA Earthdata Login Token
+This is optional.
+It's for [Flood Risk](#flood-risk)'s `Live` mode (observed current flooding) — `Historical`
+mode needs no credential at all, so the layer still works without this if you'd rather
+skip it.
+
+Register a free account at https://urs.earthdata.nasa.gov, log in, open your profile,
+and use `Generate Token` to create a Bearer token. Put it in `.env` as `EARTHDATA_TOKEN`.
+Unlike the other keys above, this token expires after around 60 days — there's no
+automatic renewal, so if `Live` mode suddenly stops updating, regenerate one and drop
+the new value in.
+
 ### Forecasting
 The map has a time scrubber built right into it — play, step forward/back, or drag through
 the available forecast hours (configurable, default 24) for any layer that supports 
@@ -313,6 +326,7 @@ The full list is:
 * World Events (conflict, explosions and high-level diplomacy)
 * Troublespots (multi-source convergence zones)
 * Air Quality (PM2.5/PM10/Smoke/SO2)
+* Flood Risk (live observed inundation / historical hazard)
 * Shipping
 * Flight Radar
 * Satellites
@@ -575,6 +589,30 @@ between them in the config UI applies instantly, no render wait. Colours follow 
 familiar green → yellow → orange → red → purple AQI convention used by most phone
 weather apps' air-quality widgets.
 ![Air Quality](docs/atmos-gl-air-quality.png)
+
+#### Flood Risk
+A land-only layer with two independently-sourced modes sharing one `Mode` selector — they
+show genuinely different things, not two views of the same data:
+
+* `Live (Observed Inundation)` — actual flooding detected right now, from NASA's LANCE
+  MODIS satellite flood product. Needs a [NASA Earthdata Login Token](#nasa-earthdata-login-token).
+  This used to be a Copernicus GloFAS ensemble river-discharge *forecast* instead, but that
+  was abandoned entirely after repeated out-of-memory crashes and unfixable network
+  flakiness against ECMWF/Copernicus's shared backend — observed satellite detection turned
+  out to be both more reliable to collect and arguably more useful than a forecast anyway.
+  Optical satellite flood detection can occasionally mistake terrain shadow in mountainous
+  regions (low sun angle across steep valleys) for flooding — a spatial filter requiring
+  flagged pixels to sit near known water suppresses most of this, though not perfectly, so
+  don't be surprised by the odd stray pixel in hill country.
+* `Historical (JRC 100yr Hazard)` — a fixed, terrain-derived flood hazard classification
+  from the Copernicus/JRC Global River Flood Hazard Maps (100-year return period), no
+  credential needed. Four severity categories from a shade under 1m depth up to over 10m,
+  mosaicked once from ~90m-resolution tiles and cached forever, since it doesn't change
+  day to day the way `Live` does.
+
+Since the two modes measure different things on different scales, switching `Mode` doesn't
+just recolour the same data — it swaps which of the two independently-rendered layers you're
+looking at, applying instantly with no render wait either way.
 
 ### Climate
 This area is quite fascinating as it covers the entire planet. The data is sourced

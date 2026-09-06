@@ -36,6 +36,9 @@
           <option value="{{ opt_value }}" {% if opt_value|string == value|string %}selected{% endif %}>{{ opt_label }}</option>
         {% endfor %}
       </select>
+      {% if spec.help_text %}
+        <div class="text-white-50" style="font-size: 11px; margin-top: 4px;">{{ spec.help_text }}</div>
+      {% endif %}
     </div>
   {% elif spec and spec.kind == "multiselect" %}
     {% set active = (value if value is iterable and value is not string else [])|map("string")|list %}

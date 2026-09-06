@@ -14,6 +14,7 @@ import pytest
 import rasterio
 from rasterio import Affine
 
+from atmos_gl.lib.flood_risk import reproject_categorical_max
 from atmos_gl.lib.vegetation_mask import (
     BURNABLE_IGBP_CLASSES,
     VegetationMaskCache,
@@ -237,3 +238,79 @@ def test_vegetation_mask_cache_treats_different_keys_independently(tmp_path):
     ) as mock_build:
         cache.get([15.0, 5.0], [5.0, 15.0], "key-b")
         mock_build.assert_called_once()
+
+
+# ---- reproject_categorical_max's max_source_pixels decimated read -----------
+#
+# Regression coverage for a real bug, not a hypothetical: querying
+# burnable_vegetation_mask() against the actual ~130MB/~3.1-billion-pixel MODIS
+# Land Cover mosaic (not this module's tiny synthetic fixtures) OOM-killed the
+# process at ~4GB RSS, because the pre-fix code always read band 1 in full
+# before remapping/reprojecting. These tests can't reproduce the OOM itself at
+# this fixture's scale, but they lock the decimated-read code path's
+# correctness so a future edit can't silently break it back into an
+# always-full-read function without a test failing.
+
+
+def test_reproject_categorical_max_decimates_when_over_the_pixel_cap(tmp_path):
+    """8x8 source (64px) with a clean north/south split, cap=8 forces a decimated
+    read (scale=sqrt(64/8)~=2.83 -> 2x2) -- the classification must still survive
+    at that resolution."""
+    path = os.path.join(str(tmp_path), "big_landcover.tif")
+    values = np.zeros((8, 8), dtype=np.uint8)
+    values[:4, :] = 1  # north half: Evergreen Needleleaf Forest (burnable)
+    values[4:, :] = 17  # south half: Water (not burnable)
+    _write_landcover_fixture(path, values, bounds=(0.0, 0.0, 8.0, 8.0))
+
+    mask = reproject_categorical_max(
+        path,
+        dst_lat=[6.0, 2.0],  # north cell, south cell (descending)
+        dst_lon=[4.0],
+        remap=_remap_igbp_to_burnable,
+        max_source_pixels=8,
+    )
+
+    assert mask.tolist() == [[1], [0]]
+
+
+def test_reproject_categorical_max_full_read_matches_decimated_read(tmp_path):
+    """Same source/destination either way -- the decimated path is a memory
+    optimisation, not a behaviour change, for a source this uniform."""
+    path = os.path.join(str(tmp_path), "big_landcover.tif")
+    values = np.zeros((8, 8), dtype=np.uint8)
+    values[:4, :] = 1
+    values[4:, :] = 17
+    _write_landcover_fixture(path, values, bounds=(0.0, 0.0, 8.0, 8.0))
+
+    full = reproject_categorical_max(
+        path, dst_lat=[6.0, 2.0], dst_lon=[4.0], remap=_remap_igbp_to_burnable
+    )
+    decimated = reproject_categorical_max(
+        path,
+        dst_lat=[6.0, 2.0],
+        dst_lon=[4.0],
+        remap=_remap_igbp_to_burnable,
+        max_source_pixels=8,
+    )
+
+    assert full.tolist() == decimated.tolist()
+
+
+def test_reproject_categorical_max_skips_decimation_under_the_pixel_cap(tmp_path):
+    """A cap the source already satisfies must behave exactly like omitting it --
+    confirms max_source_pixels is opt-in and doesn't change small-tile callers."""
+    path = os.path.join(str(tmp_path), "small_landcover.tif")
+    _write_landcover_fixture(path, _FIXTURE_VALUES, _BOUNDS)
+
+    without_cap = reproject_categorical_max(
+        path, dst_lat=[15.0, 5.0], dst_lon=[5.0, 15.0], remap=_remap_igbp_to_burnable
+    )
+    with_cap = reproject_categorical_max(
+        path,
+        dst_lat=[15.0, 5.0],
+        dst_lon=[5.0, 15.0],
+        remap=_remap_igbp_to_burnable,
+        max_source_pixels=1_000_000,
+    )
+
+    assert without_cap.tolist() == with_cap.tolist()

@@ -222,12 +222,31 @@ def tile_dst_window(tile_bounds, step_deg: float = JRC_MOSAIC_GRID_STEP_DEG):
     return row_start, row_start + n, col_start, col_start + n
 
 
-def reproject_categorical_max(tile_path: str, dst_lat, dst_lon, remap) -> np.ndarray:
+def reproject_categorical_max(
+    tile_path: str, dst_lat, dst_lon, remap, *, max_source_pixels: int | None = None
+) -> np.ndarray:
     """Public (no leading underscore): also used by lib/vegetation_mask.py, whose
     Zenodo-mirrored MODIS Land Cover GeoTIFF needs the exact same "reproject a
     single-band categorical raster onto an arbitrary destination grid" mechanics,
     despite being an unrelated data source -- there's nothing flood/JRC-specific
     about the mechanics themselves, only about each caller's own `remap` rule.
+
+    max_source_pixels: confirmed live (not a hypothetical) that omitting this reads
+    the WHOLE band 1 into memory before remap/reproject even run -- fine for JRC/
+    MODIS-flood's ~10x10deg tiles (small enough to read wholesale), but the
+    vegetation mask's source is one global ~86400x35849 mosaic (~3.1 billion
+    pixels uncompressed); reading that wholesale OOM-killed the process at ~4GB RSS
+    for even a modest 180x360 destination grid. When set and the source has more
+    pixels than this, the source is read via a decimated `out_shape` (nearest,
+    cheap) chosen so its resolution comfortably exceeds the destination's, rather
+    than reading every native pixel just to immediately discard nearly all of them
+    in the max-resample. This is a real accuracy/memory trade-off: a small
+    burnable patch entirely within pixels skipped by decimation could be missed --
+    acceptable here because the destination grids that pass this are themselves far
+    coarser than the decimated read, and the whole mask is inherently a coarse
+    sanity filter, not a precision boundary. Existing callers omit this and keep
+    doing a full wholesale read (their tiles are always small enough for it to be
+    correct and cheap) -- passing it is opt-in, so their behaviour is unchanged.
 
     Shared rasterio.warp.reproject(Resampling.max) mechanics behind
     resample_jrc_tile_onto_grid and resample_modis_flood_tile_onto_grid: read band 1
@@ -268,11 +287,25 @@ def reproject_categorical_max(tile_path: str, dst_lat, dst_lon, remap) -> np.nda
     dst = np.zeros((len(dst_lat), len(dst_lon)), dtype=np.uint8)
 
     with rasterio.open(tile_path) as src:
-        source = remap(src.read(1), src)
+        src_transform = src.transform
+        src_pixels = src.width * src.height
+        if max_source_pixels and src_pixels > max_source_pixels:
+            scale = (src_pixels / max_source_pixels) ** 0.5
+            out_width = max(1, int(src.width / scale))
+            out_height = max(1, int(src.height / scale))
+            band = src.read(
+                1, out_shape=(out_height, out_width), resampling=Resampling.nearest
+            )
+            src_transform = src.transform * src.transform.scale(
+                src.width / out_width, src.height / out_height
+            )
+        else:
+            band = src.read(1)
+        source = remap(band, src)
         reproject(
             source=source,
             destination=dst,
-            src_transform=src.transform,
+            src_transform=src_transform,
             src_crs=src.crs,
             dst_transform=dst_transform,
             dst_crs="EPSG:4326",

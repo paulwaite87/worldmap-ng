@@ -58,6 +58,16 @@ _T1_FILENAME_RE = re.compile(r"t1_c_500m_s_(\d{8})_(\d{8})_")
 # docstring for the reasoning behind wetlands (included) and urban (excluded).
 BURNABLE_IGBP_CLASSES = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14})
 
+# Confirmed live: this dataset's native resolution is one global ~86400x35849
+# mosaic (~3.1 billion pixels) -- reading that wholesale before reprojecting
+# OOM-killed the process at ~4GB RSS even for a modest 180x360 destination grid.
+# This caps the decimated read (see reproject_categorical_max's max_source_pixels)
+# well above any real destination grid's own resolution (a full-globe 0.25deg
+# render is ~1.04M points) while keeping the decimated array itself tiny
+# (<=25MB as uint8), leaving comfortable headroom for "any burnable nearby"
+# accuracy without coming anywhere near the OOM threshold.
+_MAX_SOURCE_PIXELS = 25_000_000
+
 
 def fetch_latest_zenodo_version(timeout: int = 15) -> dict:
     """The current latest-published-version record JSON for this Zenodo dataset.
@@ -149,6 +159,10 @@ def burnable_vegetation_mask(lat, lon, workdir: str):
     mask is also queried against -- so `lat` may arrive in either order here. This
     flips to descending before calling it and flips the result back to match
     whatever order the caller actually passed in, rather than assuming one.
+
+    Passes max_source_pixels=_MAX_SOURCE_PIXELS -- confirmed live that omitting
+    this OOM-kills the process (see _MAX_SOURCE_PIXELS's own comment) against this
+    dataset's real, full-resolution global mosaic.
     """
     path = vegetation_mask_geotiff_cache_path(workdir)
     if not os.path.exists(path):
@@ -164,7 +178,11 @@ def burnable_vegetation_mask(lat, lon, workdir: str):
         ascending = len(lat) > 1 and lat[0] < lat[-1]
         lat_for_reproject = lat[::-1] if ascending else lat
         mask = reproject_categorical_max(
-            path, lat_for_reproject, lon, _remap_igbp_to_burnable
+            path,
+            lat_for_reproject,
+            lon,
+            _remap_igbp_to_burnable,
+            max_source_pixels=_MAX_SOURCE_PIXELS,
         )
         if ascending:
             mask = mask[::-1]

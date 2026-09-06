@@ -663,6 +663,11 @@ describe('deriveDisplayState', () => {
     // A 3600kt due-north flight covers exactly 1 degree of latitude in 60s.
     const ELAPSED_60S = 60;
 
+    // receivedAt=1000ms; now = 1000ms + 60s (in ms) -> elapsed = exactly 60s -- for the
+    // buildFeatureCollection-level tests below (unlike deriveDisplayState itself, that
+    // function takes an absolute `now` epoch-ms timestamp, not an elapsed-seconds count).
+    const NOW_AFTER_60S = 1000 + 60 * 1000;
+
     test('no prior display state (a genuine first sighting) renders the raw dead-reckoned target directly', () => {
         const state = deriveDisplayState(movingRec(), ELAPSED_60S, undefined, 1.0, 0.6);
         expect(state.pos).toEqual({ lat: 1, lon: 0 });
@@ -719,6 +724,37 @@ describe('deriveDisplayState', () => {
         const rec = movingRec({ gs: 0, alt_baro: 'ground' });
         const state = deriveDisplayState(rec, ELAPSED_60S, { lat: 0, lon: 0, alt: 500 }, 0.6, 0.6);
         expect(state.altBaroFt).toBe('ground');
+    });
+
+    // The actual bug this closes (caught live: an aircraft landing at Wellington
+    // vanished for ~30s right before touchdown, then reappeared once on the ground).
+    // alt_baro is referenced to standard pressure, not true field elevation, so a real
+    // aircraft genuinely reports a negative alt_baro_ft while still airborne close to a
+    // near-sea-level runway whenever local QNH sits above standard -- confirmed against
+    // the real prod track for this incident (-25 -> -400ft over the ~30s before
+    // on_ground flipped true). The ALT_ZOOM_STEP MapLibre filter is ['>=', alt_baro_ft,
+    // step], which fails for ANY negative value at every zoom tier (even the loosest,
+    // 0) -- so an unclamped negative reading hides the aircraft regardless of zoom,
+    // unlike the deliberate declutter ALT_ZOOM_STEP exists for.
+    test('a real negative alt_baro_ft (QNH above standard pressure, near touchdown) is clamped to 0, not left negative', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: -275 })]]);
+
+        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S);
+
+        expect(fc.features[0].properties.alt_baro_ft).toBe(0);
+    });
+
+    test('a real negative alt_baro_ft is clamped to 0 in the built feature even while being smoothed, without corrupting the smoothing anchor', () => {
+        const aircraftByHex = new Map([['a1b2c3', movingRec({ gs: 0, alt_baro: -275 })]]);
+        const displayByHex = new Map([['a1b2c3', { lat: 0, lon: 0, alt: -100 }]]);
+
+        const fc = buildFeatureCollection(aircraftByHex, NOW_AFTER_60S, displayByHex, 0.6, 0.6);
+
+        expect(fc.features[0].properties.alt_baro_ft).toBeGreaterThanOrEqual(0);
+        // The smoothing anchor itself stays on the real (unclamped) trajectory, so a
+        // later climb back through 0 continues to ease smoothly rather than jumping
+        // from a clamped floor.
+        expect(displayByHex.get('a1b2c3').alt).toBeLessThan(0);
     });
 
     // The actual bug this closes (caught live, repeatedly, on final approach): even

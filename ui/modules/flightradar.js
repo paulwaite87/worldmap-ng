@@ -599,7 +599,20 @@ export function buildFeatureCollection(aircraftByHex, now, displayByHex = null, 
                 // value), or simply absent (no reading yet) -- three states popupHtml must
                 // not conflate (see its "ground" vs "unknown" altitude display). Dead-reckoned
                 // (extrapolatedAltitude) when it's a genuine number, same as position.
-                alt_baro_ft: typeof altBaroFt === 'number' ? altBaroFt : 0,
+                //
+                // Clamped at 0: alt_baro is referenced to standard pressure (1013.25 hPa/
+                // 29.92inHg), not true field elevation, so on any day the local QNH sits above
+                // standard, a real aircraft genuinely reports a NEGATIVE alt_baro_ft while still
+                // airborne close to a near-sea-level runway -- confirmed live on a Wellington
+                // landing (real track: -25 -> -400ft over the ~30s right before touchdown, then
+                // NULL/on_ground=true). The ALT_ZOOM_STEP filter's ['>=', alt_baro_ft, step]
+                // check fails against ANY negative value at every zoom level (even the loosest
+                // tier, 0), so the unclamped value made the aircraft vanish for those ~30s and
+                // only reappear once on_ground's own 0 fallback kicked in -- an unintended,
+                // zoom-independent flicker, not the deliberate declutter ALT_ZOOM_STEP exists
+                // for. Clamping here (rather than in ALT_ZOOM_STEP itself) keeps the fix scoped
+                // to this real-vs-filter mismatch without touching the declutter thresholds.
+                alt_baro_ft: typeof altBaroFt === 'number' ? Math.max(0, altBaroFt) : 0,
                 alt_baro_known: typeof rec.alt_baro === 'number',
                 on_ground: rec.alt_baro === 'ground',
                 // adsb.lol's real reported rate wins when present (more instantaneous

@@ -584,14 +584,16 @@ Sea Surface Temperature, Air Temperature, Ocean Currents and
 the Ozone Layer data resolved to a 0.25 degree grid (with interpolation/smoothing
 as required).
 
-Each of Sea Surface Temperature, Ocean Currents, Air Temperature, Ozone,
-Storm Watch and Greenhouse Gases is mutually exclusive as a "climate base layer" — the
-`Show` tab presents them as radio buttons rather than independent checkboxes, since they
-each colourise the entire planet and having more than one on at once would just be a
-useless mashup of overlapping colours. In fact use of these layers is best done with
-just about every other colourising layer disabled — that would include Precipitation
-and Precipitable Water — though for marker elements such as Earthquakes, Shipping etc
-it isn't so important.
+Each of Sea Surface Temperature, Ocean Currents, Air Temperature, Ozone, Storm Watch
+and Greenhouse Gases can be shown independently — the `Show` tab presents them as
+regular checkboxes, so you're free to enable as many at once as you like (SST Anomaly
+alongside Ocean Currents, for instance). Since most of these colourise the entire
+planet, though, showing several at once usually turns into an overlapping mashup of
+colour rather than anything readable — `Opacity` on each layer is there to help you
+find a combination that works, and in general it's still worth keeping most other
+colourising layers (Precipitation, Precipitable Water) switched off while you're
+looking at Climate data, though marker elements like Earthquakes and Shipping are
+no problem to leave on alongside any of these.
 
 #### SST
 Sea Surface Temperature, sourced straight from NOAA's data. A fascinating visualisation

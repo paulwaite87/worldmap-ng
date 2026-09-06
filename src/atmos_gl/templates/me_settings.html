@@ -1,9 +1,9 @@
 {%- import "_field_macros.html" as field_macros -%}
 {%- set categories = [
-    ("Weather", "weather", ["clouds", "isobars", "wind", "jetstream", "precipitation", "pwat", "lightning", "storms", "waves"], false),
-    ("Climate", "climate", ["sst", "currents", "temperature", "ozone", "stormwatch", "greenhouse_gases"], true),
-    ("Events", "events", ["quakes", "volcanoes", "fires", "air_quality", "world_events", "troublespots", "flood_risk"], false),
-    ("Miscellaneous", "misc", ["satellites", "terminator", "markers", "flightradar", "landmass", "shipping"], false),
+    ("Weather", "weather", ["clouds", "isobars", "wind", "jetstream", "precipitation", "pwat", "lightning", "storms", "waves"]),
+    ("Climate", "climate", ["sst", "currents", "temperature", "ozone", "stormwatch", "greenhouse_gases"]),
+    ("Events", "events", ["quakes", "volcanoes", "fires", "air_quality", "world_events", "troublespots", "flood_risk"]),
+    ("Miscellaneous", "misc", ["satellites", "terminator", "markers", "flightradar", "landmass", "shipping"]),
 ] -%}
 <!DOCTYPE html>
 <html lang="en">
@@ -41,7 +41,7 @@
             {% else %}
                 <ul class="nav nav-tabs mb-3" id="psTabs" role="tablist">
                     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#show-pane" type="button">Show</button></li>
-                    {% for label, slug, category_sections, is_exclusive in categories %}
+                    {% for label, slug, category_sections in categories %}
                         {% if category_sections | select("in", sections) | list %}
                             <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#{{ slug }}-pane" type="button">{{ label }}</button></li>
                         {% endif %}
@@ -49,27 +49,23 @@
                 </ul>
 
                 <div class="tab-content">
-                    {# --- Show tab: one checkbox (or, for Climate, one radio) per layer --
-                       the ONLY place `enabled` is edited; render_tab_group's per-category
-                       panes below exclude it entirely (see _field_macros.html's
-                       render_field_group), matching config.html's own Show/category split. #}
+                    {# --- Show tab: one checkbox per layer -- the ONLY place `enabled` is
+                       edited; render_tab_group's per-category panes below exclude it
+                       entirely (see _field_macros.html's render_field_group), matching
+                       config.html's own Show/category split. #}
                     <div class="tab-pane fade show active" id="show-pane">
-                        {% for label, slug, category_sections, is_exclusive in categories %}
+                        {% for label, slug, category_sections in categories %}
                             {% set present = category_sections | select("in", sections) | list %}
                             {% if present %}
                                 <div class="grouping-box">
                                     <h5>{{ label }}</h5>
-                                    {% if is_exclusive %}
-                                        <p class="text-muted small mb-3">Select a climate base layer to render across the globe -- only one shows at a time.</p>
-                                    {% endif %}
                                     <div class="row g-3">
                                         {% for section in present %}
                                             {% if "enabled" in sections[section] %}
                                                 <div class="col-md-4">
-                                                    <div class="form-check {{ '' if is_exclusive else 'form-switch' }}">
+                                                    <div class="form-check form-switch">
                                                         <input class="form-check-input section-enable-toggle" data-section="{{ section }}"
-                                                               type="{{ 'radio' if is_exclusive else 'checkbox' }}"
-                                                               {% if is_exclusive %}name="exclusive_climate"{% endif %}
+                                                               type="checkbox"
                                                                id="{{ section }}__enabled"
                                                                {% if sections[section]['enabled'] %}checked{% endif %}>
                                                         <label class="form-check-label fw-bold ms-2" for="{{ section }}__enabled">{{ section_label(section) }}</label>
@@ -78,15 +74,12 @@
                                             {% endif %}
                                         {% endfor %}
                                     </div>
-                                    {% if is_exclusive %}
-                                        <div class="mt-2"><button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearClimateRadio()">None / Disable Climate Base Layer</button></div>
-                                    {% endif %}
                                 </div>
                             {% endif %}
                         {% endfor %}
                     </div>
 
-                    {% for label, slug, category_sections, is_exclusive in categories %}
+                    {% for label, slug, category_sections in categories %}
                         {% set present = category_sections | select("in", sections) | list %}
                         {% if present %}
                             <div class="tab-pane fade" id="{{ slug }}-pane">
@@ -210,10 +203,7 @@
             }
         }
 
-        // Fire-and-forget PATCH for a single {section}.enabled write -- used both for the
-        // toggle the visitor directly clicked and, for the climate radio group, the
-        // sibling(s) the browser silently unchecked as a side effect (see the 'change'
-        // listener below).
+        // Fire-and-forget PATCH for a single {section}.enabled write.
         async function saveSectionEnabled(section, enabled) {
             setStatus('Saving…');
             try {
@@ -267,23 +257,14 @@
             });
         }
 
-        function clearClimateRadio() {
-            document.querySelectorAll('input[name="exclusive_climate"]').forEach((r) => {
-                if (r.checked) {
-                    r.checked = false;
-                    saveSectionEnabled(r.dataset.section, false);
-                }
-            });
-            toggleSectionVisibility();
-        }
 
         // Grays out any layer whose data collection is actually off right now (GET
         // /api/layer_availability -- lib/layer_availability.py), independent of and
         // in addition to toggleSectionVisibility() above: a layer can be "enabled"
-        // (this checkbox/radio checked) while its collector is paused by an admin
-        // setting elsewhere (the master data_collector switch, a channel_enabled
-        // opt-out, or one of shipping/lightning/flightradar's own kill-switch) -- see
-        // the grilled design. Left exactly as saved otherwise; only `disabled` and an
+        // (this checkbox checked) while its collector is paused by an admin setting
+        // elsewhere (the master data_collector switch, a channel_enabled opt-out, or
+        // one of shipping/lightning/flightradar's own kill-switch) -- see the grilled
+        // design. Left exactly as saved otherwise; only `disabled` and an
         // explanatory note are added, so re-enabling collection makes it work again
         // with no re-toggle needed. Mirrors config.html's own copy of this function --
         // same pattern as toggleSectionVisibility/resetSectionToDefaults above, kept
@@ -322,20 +303,7 @@
 
         document.addEventListener('change', (e) => {
             if (!e.target.classList.contains('section-enable-toggle')) return;
-            const section = e.target.dataset.section;
-
-            // A native <input type="radio"> auto-unchecks its siblings in the same
-            // name= group without firing THEIR 'change' event -- persist "now off" for
-            // whichever climate layer this one just replaced, or its stale
-            // enabled:true override would resurrect it (both would show enabled again)
-            // on the next page load.
-            if (e.target.type === 'radio' && e.target.checked) {
-                document.querySelectorAll(`input[name="${e.target.name}"]`).forEach((sibling) => {
-                    if (sibling !== e.target) saveSectionEnabled(sibling.dataset.section, false);
-                });
-            }
-
-            saveSectionEnabled(section, e.target.checked);
+            saveSectionEnabled(e.target.dataset.section, e.target.checked);
             toggleSectionVisibility();
         });
 

@@ -46,6 +46,13 @@ Synchronous file caches  (CACHE_COLLECTORS)  — write an image/netCDF under {wo
                (this used to fetch a GloFAS ensemble discharge FORECAST via EWDS
                and live in that list; abandoned for real, unfixable OOM/network
                problems -- see collectors/flood_risk.py's module docstring).
+  vegetation_mask — MODIS Land Cover (MCD12Q1 IGBP classification), a single global
+               GeoTIFF mirrored on Zenodo (no auth needed), re-fetched only when
+               Zenodo publishes a newer annual release (VegetationMaskCollector,
+               collectors/vegetation_mask.py). Shares its settings_section ("fires")
+               and channel_key with FiresCollector -- it's the burnable-vegetation
+               mask the Fire Risk layer (tasks/fire_weather.py) ANDs against the
+               Fosberg index, and has no purpose if Fires isn't running.
 
   These are single fields (one daily netCDF / one global image), not per-forecast-hour
   products, so they live as file caches rather than fieldstore rows. The layer updaters
@@ -93,6 +100,7 @@ from atmos_gl.collectors.gfs_atmos import GfsAtmosCollector
 from atmos_gl.collectors.gfs_waves import GfsWavesCollector
 from atmos_gl.collectors.rtofs_currents import RtofsCurrentsCollector
 from atmos_gl.collectors.flood_risk import FloodRiskHistoricalCollector, FloodRiskLiveCollector
+from atmos_gl.collectors.vegetation_mask import VegetationMaskCollector
 from atmos_gl.collectors.driving import EventFeedDriver
 
 logger = logging.getLogger(__name__)
@@ -119,6 +127,7 @@ CACHE_COLLECTORS = (
     AirQualityCollector,
     FloodRiskHistoricalCollector,
     FloodRiskLiveCollector,
+    VegetationMaskCollector,
 )
 
 # Field collectors (fieldstore-backed, FieldCollectorBase), driven per-cycle by

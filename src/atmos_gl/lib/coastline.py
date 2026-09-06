@@ -238,26 +238,33 @@ def coastline_land_mask(
 
 
 class LandMaskCache:
-    """Global (-180/-90/180/90) coastline land mask, cached per regridded-grid shape
-    for the life of one run -- shared by CurrentsUpdater and WavesUpdater, whose own
-    per-class caching wrapper around coastline_land_mask() used to be byte-identical.
-    `label` distinguishes each caller's log lines ("Currents"/"Waves"); a shape that
-    fails once (geometry unavailable) is cached as None too, so it doesn't retry every
-    call within the same run."""
+    """Global (-180/-90/180/90) coastline land mask, cached per grid for the life of
+    one run -- shared by CurrentsUpdater and WavesUpdater, whose own per-class
+    caching wrapper around coastline_land_mask() used to be byte-identical.
+    `label` distinguishes each caller's log lines ("Currents"/"Waves"); a key that
+    fails once (geometry unavailable) is cached as None too, so it doesn't retry
+    every call within the same run.
+
+    `key` is an opaque cache key chosen by the caller -- usually just the grid's
+    array shape (every existing caller queries one consistent grid per run, so
+    shape alone is a safe key), but not necessarily: FireWeatherUpdater
+    (tasks/fire_weather.py) queries two genuinely different grids per render that
+    can coincidentally share a shape, so it includes each grid's latitude
+    endpoints too. `key` is never compared against the mask's actual shape."""
 
     def __init__(self, label: str):
         self._label = label
         self._cache = {}
 
-    def get(self, lat, lon, shape):
-        if shape in self._cache:
-            return self._cache[shape]
+    def get(self, lat, lon, key):
+        if key in self._cache:
+            return self._cache[key]
         mesh_lon, mesh_lat = np.meshgrid(np.asarray(lon), np.asarray(lat))
         land = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
-        self._cache[shape] = land
+        self._cache[key] = land
         if land is not None:
             logger.info(
-                f"{self._label}: built {shape} coastline land mask "
+                f"{self._label}: built {key} coastline land mask "
                 f"({int(land.sum())} land cells cut)."
             )
         return land

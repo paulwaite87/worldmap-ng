@@ -35,28 +35,28 @@ def _clear_coast_geom_cache():
 # LandMaskCache
 # ---------------------------------------------------------------------------
 
-def test_get_caches_per_shape():
+def test_get_caches_per_key():
     cache = LandMaskCache("Test")
     sentinel = np.array([[True, False]])
     with patch(
         "atmos_gl.lib.coastline.coastline_land_mask", return_value=sentinel
     ) as mock_coast:
-        first = cache.get(lat=[0.0], lon=[0.0, 1.0], shape=(1, 2))
-        second = cache.get(lat=[0.0], lon=[0.0, 1.0], shape=(1, 2))
+        first = cache.get(lat=[0.0], lon=[0.0, 1.0], key=(1, 2))
+        second = cache.get(lat=[0.0], lon=[0.0, 1.0], key=(1, 2))
 
     assert first is sentinel
     assert second is sentinel
     mock_coast.assert_called_once()
 
 
-def test_get_uses_a_separate_cache_entry_per_distinct_shape():
+def test_get_uses_a_separate_cache_entry_per_distinct_key():
     cache = LandMaskCache("Test")
     with patch(
         "atmos_gl.lib.coastline.coastline_land_mask",
         side_effect=[np.array([[True]]), np.array([[False, False]])],
     ) as mock_coast:
-        cache.get(lat=[0.0], lon=[0.0], shape=(1, 1))
-        cache.get(lat=[0.0], lon=[0.0, 1.0], shape=(1, 2))
+        cache.get(lat=[0.0], lon=[0.0], key=(1, 1))
+        cache.get(lat=[0.0], lon=[0.0, 1.0], key=(1, 2))
 
     assert mock_coast.call_count == 2
 
@@ -66,7 +66,7 @@ def test_get_passes_the_global_bbox():
     with patch(
         "atmos_gl.lib.coastline.coastline_land_mask", return_value=None
     ) as mock_coast:
-        cache.get(lat=[0.0], lon=[0.0], shape=(1, 1))
+        cache.get(lat=[0.0], lon=[0.0], key=(1, 1))
 
     args = mock_coast.call_args.args
     assert args[2:] == (-180.0, -90.0, 180.0, 90.0)
@@ -74,14 +74,14 @@ def test_get_passes_the_global_bbox():
 
 def test_get_caches_none_too_when_geometry_is_unavailable():
     """Matches the pre-extraction behavior exactly: a None result (geometry load
-    failure) is cached like any other value, so a shape that failed once doesn't
+    failure) is cached like any other value, so a key that failed once doesn't
     retry every subsequent call within the same run."""
     cache = LandMaskCache("Test")
     with patch(
         "atmos_gl.lib.coastline.coastline_land_mask", return_value=None
     ) as mock_coast:
-        first = cache.get(lat=[0.0], lon=[0.0], shape=(1, 1))
-        second = cache.get(lat=[0.0], lon=[0.0], shape=(1, 1))
+        first = cache.get(lat=[0.0], lon=[0.0], key=(1, 1))
+        second = cache.get(lat=[0.0], lon=[0.0], key=(1, 1))
 
     assert first is None
     assert second is None

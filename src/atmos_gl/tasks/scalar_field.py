@@ -197,6 +197,20 @@ class ScalarFieldUpdater(SingleHourScalarUpdater):
         super().__init__(config, spec.product, map_data)
         self.spec = spec
 
+    def _mask_values(self, values, lats, lons):
+        """Optional per-spec masking hook. Default: no-op passthrough --
+        temperature/ozone/stormwatch/pwat are all meaningful everywhere on the
+        globe and never override this. FireWeatherUpdater is the one real override
+        (issue #390): Fire Risk isn't meaningful over open ocean or unvegetated
+        land, however dry and windy conditions there might be.
+
+        Called twice per plot() (see below), once for each of the two different
+        grids it renders from -- the native-resolution field (feeding the GPU data
+        texture) and the LOD-regridded field (feeding the static contourf PNG) --
+        so a subclass overriding this must not assume a fixed grid shape or
+        latitude ordering between calls."""
+        return values
+
     def _resolve_cmap(self):
         """The plain named `spec.cmap` for temperature/stormwatch, or the live
         threshold-built colormap for ozone/pwat (spec.threshold_setting set) --
@@ -237,6 +251,7 @@ class ScalarFieldUpdater(SingleHourScalarUpdater):
 
         # LOD interpolation
         new_lats, new_lons, values_smooth = self.regrid_for_lod(values, lats, lons)
+        values_smooth = self._mask_values(values_smooth, new_lats, new_lons)
 
         output_path_for_hour = self.get_output_path_for_hour(state.fhour)
 
@@ -288,7 +303,8 @@ class ScalarFieldUpdater(SingleHourScalarUpdater):
         # --- WebGL single-hour data texture (one frame per forecast hour;
         # the frontend scrubber assembles the animation from consecutive hours) ---
         base, _ = os.path.splitext(output_path_for_hour)
+        texture_values = self._mask_values(field0["values"], lats, lons)
         encode_frames(
-            [field0["values"]], f"{base}_data.png", self.spec.vmin, self.spec.vmax
+            [texture_values], f"{base}_data.png", self.spec.vmin, self.spec.vmax
         )
         logger.info(f"Finished {self.section} texture f{state.fhour:03d}.")

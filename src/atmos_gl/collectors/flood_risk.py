@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from atmos_gl.collectors.base import CollectorBase
-from atmos_gl.lib.data_status import build_status, estimate_next_update, read_process_status
+from atmos_gl.lib.data_status import build_status, read_process_status
 from atmos_gl.lib.flood_risk import (
     JRC_BASE_URL,
     LANCE_BASE_URL,
@@ -54,7 +54,6 @@ from atmos_gl.lib.flood_risk import (
     fetch_modis_flood_listing,
     jrc_hazard_mosaic_cache_path,
     jrc_tile_cache_path,
-    load_jrc_hazard_mosaic,
     load_jrc_tile_index,
     modis_flood_mosaic_cache_path,
     modis_flood_tile_bounds,

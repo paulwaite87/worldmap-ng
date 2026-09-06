@@ -16,7 +16,7 @@ services:
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
       - FIRMS_API_KEY=${FIRMS_API_KEY}
       - CDSAPI_KEY=${CDSAPI_KEY}
-      - GLOFAS_API_KEY=${GLOFAS_API_KEY}
+      - EARTHDATA_TOKEN=${EARTHDATA_TOKEN}
       - TZ=Pacific/Auckland
       - PYTHONPATH=/opt/project/src
       - PYTHONUNBUFFERED=1

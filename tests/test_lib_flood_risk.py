@@ -1,373 +1,36 @@
 import os
-from unittest.mock import patch
+import time
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-import xarray as xr
 
 from atmos_gl.lib.flood_risk import (
-    GLOFAS_LEADTIME_HOURS,
     JRC_MOSAIC_GRID_STEP_DEG,
-    RETURN_PERIODS_YEARS,
-    build_glofas_forecast_request,
+    MODIS_FLOOD_VALUE,
     build_jrc_mosaic_grid,
+    cached_modis_flood_tiles,
     count_cached_jrc_tiles,
-    ensemble_severity_band,
-    ensure_gumbel_fit_cached,
     ensure_jrc_tile_cached,
     ensure_jrc_tile_extents_cached,
-    gumbel_fit_cache_path,
-    gumbel_return_period,
-    gumbel_threshold_discharge,
+    ensure_modis_flood_tile_cached,
+    fetch_modis_flood_listing,
     jrc_tile_cache_path,
     jrc_tile_extents_cache_path,
-    load_gumbel_fit,
     load_jrc_hazard_mosaic,
     load_jrc_tile_index,
-    pad_glofas_grid_to_global_lat,
-    regrid_nearest,
+    modis_flood_listing_url,
+    modis_flood_tile_bounds,
+    modis_flood_tile_cache_path,
+    modis_flood_tile_is_current,
+    parse_modis_flood_listing,
+    prune_stale_modis_flood_tiles,
     resample_jrc_tile_onto_grid,
+    resample_modis_flood_tile_onto_grid,
+    resolve_earthdata_token,
     save_jrc_hazard_mosaic,
     tile_dst_window,
 )
-
-
-# ---- gumbel_return_period / gumbel_threshold_discharge -----------------------
-
-
-def test_gumbel_threshold_discharge_round_trips_through_return_period():
-    """The discharge computed FOR a given return period must, fed back through
-    gumbel_return_period, reproduce that same return period -- the two are meant to
-    be exact inverses of each other (see module docstring's closed-form derivation)."""
-    loc, scale = 500.0, 150.0
-    for years in (2.0, 5.0, 20.0, 100.0):
-        q = gumbel_threshold_discharge(years, loc, scale)
-        rp = gumbel_return_period(np.array([q]), np.array([loc]), np.array([scale]))
-        assert rp[0] == pytest.approx(years, rel=1e-6)
-
-
-def test_gumbel_threshold_discharge_increases_with_return_period():
-    """A rarer (higher-year) event must correspond to a larger discharge threshold."""
-    loc, scale = 500.0, 150.0
-    q2 = gumbel_threshold_discharge(2.0, loc, scale)
-    q20 = gumbel_threshold_discharge(20.0, loc, scale)
-    q100 = gumbel_threshold_discharge(100.0, loc, scale)
-    assert q2 < q20 < q100
-
-
-def test_gumbel_return_period_increases_with_discharge():
-    loc, scale = 500.0, 150.0
-    low = gumbel_return_period(np.array([400.0]), np.array([loc]), np.array([scale]))
-    high = gumbel_return_period(np.array([2000.0]), np.array([loc]), np.array([scale]))
-    assert high[0] > low[0]
-
-
-def test_gumbel_return_period_is_nan_for_non_positive_scale():
-    """Non-positive scale means no valid fit (e.g. a permanent no-flow/ocean cell) --
-    must not divide by zero or a negative scale and silently return a bogus number."""
-    rp = gumbel_return_period(np.array([500.0, 500.0]), np.array([100.0, 100.0]), np.array([0.0, -5.0]))
-    assert np.isnan(rp[0])
-    assert np.isnan(rp[1])
-
-
-def test_gumbel_return_period_broadcasts_elementwise_across_arrays():
-    discharge = np.array([100.0, 500.0, 2000.0])
-    loc = np.full(3, 400.0)
-    scale = np.full(3, 120.0)
-    rp = gumbel_return_period(discharge, loc, scale)
-    assert rp.shape == (3,)
-    assert rp[2] > rp[1] > rp[0]
-
-
-# ---- ensemble_severity_band ---------------------------------------------------
-
-
-def test_ensemble_severity_band_all_members_exceed_highest_tier():
-    loc = np.array([[500.0]])
-    scale = np.array([[150.0]])
-    q20 = gumbel_threshold_discharge(20.0, loc, scale)
-    ensemble = np.full((50, 1, 1), q20 + 1000.0)  # every member well above the 20yr threshold
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 3  # index into RETURN_PERIODS_YEARS, 1-based -> 20yr
-    assert fraction[0, 0] == pytest.approx(1.0)
-
-
-def test_ensemble_severity_band_no_members_exceed_lowest_tier():
-    loc = np.array([[500.0]])
-    scale = np.array([[150.0]])
-    q2 = gumbel_threshold_discharge(2.0, loc, scale)
-    ensemble = np.full((50, 1, 1), q2 - 1000.0)  # every member well below even the 2yr threshold
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 0
-    assert fraction[0, 0] == pytest.approx(0.0)
-
-
-def test_ensemble_severity_band_picks_highest_tier_meeting_the_majority_bar():
-    """A cell where >=50% of members exceed the 2yr AND 5yr thresholds, but fewer
-    than half exceed 20yr, must be classified at the 5yr band (index 2) -- not the
-    lowest (2yr) tier that also happens to be satisfied."""
-    loc = np.array([[500.0]])
-    scale = np.array([[150.0]])
-    q5 = gumbel_threshold_discharge(5.0, loc, scale)
-    q20 = gumbel_threshold_discharge(20.0, loc, scale)
-    ensemble = np.full((50, 1, 1), (q5 + q20) / 2.0)  # exceeds 5yr, not 20yr, for every member
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 2
-    assert fraction[0, 0] == pytest.approx(1.0)
-
-
-def test_ensemble_severity_band_boundary_is_inclusive_at_exactly_half():
-    """Exactly half the members exceeding a threshold must count as meeting that
-    band (>=0.5), not fall just short of it."""
-    loc = np.array([[500.0]])
-    scale = np.array([[150.0]])
-    q2 = gumbel_threshold_discharge(2.0, loc, scale)
-    ensemble = np.empty((50, 1, 1))
-    ensemble[:25] = q2 + 10.0  # above threshold
-    ensemble[25:] = q2 - 10.0  # below threshold
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 1
-    assert fraction[0, 0] == pytest.approx(0.5)
-
-
-def test_ensemble_severity_band_shape_matches_grid_not_member_count():
-    loc = np.full((4, 3), 500.0)
-    scale = np.full((4, 3), 150.0)
-    ensemble = np.random.default_rng(0).uniform(0.0, 1000.0, size=(50, 4, 3))
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band.shape == (4, 3)
-    assert fraction.shape == (4, 3)
-    assert band.dtype == np.int8
-
-
-def test_ensemble_severity_band_masks_cells_with_negative_loc():
-    """A negative Gumbel loc is physically impossible for river discharge (always
-    >=0) -- confirmed live over Greenland's ice sheet (no real river network) that a
-    regridded negative loc collapses the threshold toward/below zero, so ordinary
-    discharge noise spuriously "exceeds" every tier. Such cells must render as band 0
-    (no risk), not a spurious high band, regardless of how much discharge is present."""
-    loc = np.array([[-50.0]])
-    scale = np.array([[10.0]])
-    ensemble = np.full((50, 1, 1), 5.0)  # tiny, near-zero discharge -- would otherwise exceed a negative threshold
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 0
-    assert fraction[0, 0] == pytest.approx(0.0)
-
-
-def test_ensemble_severity_band_masks_cells_with_non_positive_scale():
-    """Mirrors gumbel_return_period's own scale<=0 guard -- a degenerate/no-flow fit
-    must not be classified at all, even if raw discharge happens to be nonzero."""
-    loc = np.array([[500.0]])
-    scale = np.array([[0.0]])
-    ensemble = np.full((50, 1, 1), 10000.0)
-    band, fraction = ensemble_severity_band(ensemble, loc, scale)
-    assert band[0, 0] == 0
-    assert fraction[0, 0] == pytest.approx(0.0)
-
-
-def test_return_periods_years_matches_glofas_official_bands():
-    """Pinned so an accidental edit to the tier list is caught -- these three values
-    are GloFAS's own official reporting-point classification, not arbitrary."""
-    assert RETURN_PERIODS_YEARS == (2.0, 5.0, 20.0)
-
-
-# ---- regrid_nearest -------------------------------------------------------------
-
-
-def test_pad_glofas_grid_to_global_lat_extends_to_a_full_180_degree_span():
-    """GloFAS's own domain stops well short of -90 (LISFLOOD excludes Antarctica) --
-    confirmed live the app's WebGL data-texture shader assumes every texture spans
-    the full -90..90 range linearly (matching build_jrc_mosaic_grid's own full-globe
-    axis), so encoding the native, shorter grid unpadded stretches it to fill that
-    height and displaces real features south of their true position."""
-    lat = np.array([20.0, 10.0, 0.0])  # descending, 10-degree step, native domain
-    values = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    padded, padded_lat = pad_glofas_grid_to_global_lat(values, lat)
-    assert padded.shape == (18, 2)  # 180 / 10
-    assert padded_lat[0] == 20.0
-    assert padded_lat[-1] == pytest.approx(-150.0)
-
-
-def test_pad_glofas_grid_to_global_lat_preserves_native_rows_at_the_top():
-    """The native (north-first) rows must land unchanged at the top of the padded
-    grid -- padding is added below them (south), not interleaved or reordered."""
-    lat = np.array([20.0, 10.0, 0.0])
-    values = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    padded, padded_lat = pad_glofas_grid_to_global_lat(values, lat)
-    assert np.array_equal(padded[:3], values)
-    assert np.array_equal(padded_lat[:3], lat)
-
-
-def test_pad_glofas_grid_to_global_lat_fills_the_missing_south_with_nan():
-    """The padded (missing) rows must be NaN, not zero -- encode_frames masks NaN
-    cells to fully transparent (alpha=0), the correct "no data here" rendering,
-    rather than a spurious "confirmed zero severity" opaque black fill."""
-    lat = np.array([20.0, 10.0, 0.0])
-    values = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    padded, _ = pad_glofas_grid_to_global_lat(values, lat)
-    assert np.all(np.isnan(padded[3:]))
-
-
-def test_regrid_nearest_reproduces_source_values_at_matching_points():
-    src_lat = np.array([0.0, 10.0, 20.0])
-    src_lon = np.array([0.0, 10.0, 20.0])
-    values = np.array(
-        [
-            [1.0, 2.0, 3.0],
-            [4.0, 5.0, 6.0],
-            [7.0, 8.0, 9.0],
-        ]
-    )
-    out = regrid_nearest(values, src_lat, src_lon, src_lat, src_lon)
-    assert np.array_equal(out, values)
-
-
-def test_regrid_nearest_handles_descending_latitude_axis():
-    """GloFAS-family grids are commonly stored north-first (descending latitude) --
-    must not silently flip or misalign the field when the source axis descends."""
-    src_lat = np.array([20.0, 10.0, 0.0])  # descending
-    src_lon = np.array([0.0, 10.0])
-    values = np.array(
-        [
-            [7.0, 8.0],  # lat=20
-            [4.0, 5.0],  # lat=10
-            [1.0, 2.0],  # lat=0
-        ]
-    )
-    dst_lat = np.array([20.0, 10.0, 0.0])
-    dst_lon = np.array([0.0, 10.0])
-    out = regrid_nearest(values, src_lat, src_lon, dst_lat, dst_lon)
-    assert np.array_equal(out, values)
-
-
-def test_glofas_leadtime_hours_covers_a_7_day_horizon_at_24h_steps():
-    """Pinned so an accidental edit is caught -- see issue #371's decision to cap the
-    Live mode horizon at 7 days despite GloFAS supporting leadtimes out to 720h."""
-    assert GLOFAS_LEADTIME_HOURS == ("24", "48", "72", "96", "120", "144", "168")
-
-
-def test_build_glofas_forecast_request_splits_date_str_into_year_month_day():
-    request = build_glofas_forecast_request("20260829", "24")
-    assert request["year"] == ["2026"]
-    assert request["month"] == ["08"]
-    assert request["day"] == ["29"]
-
-
-def test_build_glofas_forecast_request_targets_the_full_ensemble_and_one_leadtime_hour():
-    """One request per leadtime hour now (not all of GLOFAS_LEADTIME_HOURS in a
-    single job) -- see FloodRiskLiveCollector.collect's docstring."""
-    request = build_glofas_forecast_request("20260829", "72")
-    assert request["product_type"] == ["ensemble_perturbed_forecasts"]
-    assert request["variable"] == ["river_discharge_in_the_last_24_hours"]
-    assert request["leadtime_hour"] == ["72"]
-
-
-def test_build_glofas_forecast_request_delivers_a_bare_unarchived_netcdf():
-    """GloFAS's format differs from CAMS's netcdf_zip -- must request the unarchived
-    form so retrieve_with_fallback's unzip=False path is the correct one to use."""
-    request = build_glofas_forecast_request("20260829", "24")
-    assert request["data_format"] == "netcdf"
-    assert request["download_format"] == "unarchived"
-
-
-def test_regrid_nearest_upsamples_coarse_grid_onto_finer_grid():
-    """Mirrors the real use case: a coarser static grid (e.g. ETH's 0.1deg Gumbel
-    fit) resampled onto a finer forecast grid (e.g. GloFAS's 0.05deg operational
-    grid) -- every fine-grid point should pick up its nearest coarse-grid value."""
-    src_lat = np.array([0.0, 10.0])
-    src_lon = np.array([0.0, 10.0])
-    values = np.array([[1.0, 2.0], [3.0, 4.0]])
-    dst_lat = np.array([0.0, 2.0, 8.0, 10.0])
-    dst_lon = np.array([0.0, 2.0, 8.0, 10.0])
-    out = regrid_nearest(values, src_lat, src_lon, dst_lat, dst_lon)
-    assert out.shape == (4, 4)
-    assert out[0, 0] == 1.0  # nearest to (0, 0)
-    assert out[-1, -1] == 4.0  # nearest to (10, 10)
-
-
-# ---- ensure_gumbel_fit_cached / load_gumbel_fit ---------------------------------
-
-
-def _make_gumbel_netcdf_bytes(tmp_path, loc_value=500.0, scale_value=100.0):
-    """A tiny, genuinely valid gumbel-fit.nc-shaped netCDF (loc/scale/lat/lon), built
-    via xarray rather than hand-crafted bytes -- ensure_gumbel_fit_cached's own
-    corruption check opens the file with xarray, so a fixture built the same way
-    exercises the real code path."""
-    ds = xr.Dataset(
-        {
-            "loc": (("latitude", "longitude"), [[loc_value]]),
-            "scale": (("latitude", "longitude"), [[scale_value]]),
-        },
-        coords={"latitude": [10.0], "longitude": [20.0]},
-    )
-    path = tmp_path / "src.nc"
-    ds.to_netcdf(path)
-    return path.read_bytes()
-
-
-def test_ensure_gumbel_fit_cached_downloads_and_caches_when_not_present(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    valid_bytes = _make_gumbel_netcdf_bytes(tmp_path)
-
-    with patch("atmos_gl.lib.gfs.download_whole", return_value=valid_bytes) as mock_download:
-        path = ensure_gumbel_fit_cached()
-
-    mock_download.assert_called_once()
-    assert path == gumbel_fit_cache_path()
-    assert os.path.exists(path)
-    assert open(path, "rb").read() == valid_bytes
-
-
-def test_ensure_gumbel_fit_cached_skips_download_when_already_cached(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    dest = gumbel_fit_cache_path()
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    with open(dest, "wb") as f:
-        f.write(b"already-here")
-
-    with patch("atmos_gl.lib.gfs.download_whole") as mock_download:
-        path = ensure_gumbel_fit_cached()
-
-    mock_download.assert_not_called()
-    assert path == dest
-    assert open(path, "rb").read() == b"already-here"
-
-
-def test_ensure_gumbel_fit_cached_raises_and_leaves_no_file_on_corrupt_download(
-    tmp_path, monkeypatch
-):
-    """A truncated/corrupt transfer must never be treated as 'already cached' by a
-    later cycle's plain os.path.exists() check -- confirmed live during issue #371's
-    spike that a plain download against this same host CAN silently truncate."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    with patch("atmos_gl.lib.gfs.download_whole", return_value=b"not a real netcdf file"):
-        with pytest.raises(Exception):
-            ensure_gumbel_fit_cached()
-
-    dest = gumbel_fit_cache_path()
-    assert not os.path.exists(dest)
-    assert not os.path.exists(dest + ".tmp")
-
-
-def test_load_gumbel_fit_returns_loc_scale_lat_lon_arrays(tmp_path):
-    path = tmp_path / "gumbel.nc"
-    ds = xr.Dataset(
-        {
-            "loc": (("latitude", "longitude"), [[500.0, 600.0]]),
-            "scale": (("latitude", "longitude"), [[100.0, 120.0]]),
-        },
-        coords={"latitude": [10.0], "longitude": [20.0, 30.0]},
-    )
-    ds.to_netcdf(path)
-
-    loc, scale, lat, lon = load_gumbel_fit(str(path))
-
-    assert loc.shape == (1, 2)
-    assert loc[0, 1] == pytest.approx(600.0)
-    assert scale[0, 0] == pytest.approx(100.0)
-    assert list(lat) == [10.0]
-    assert list(lon) == [20.0, 30.0]
 
 
 # ---- JRC Global River Flood Hazard Maps (Historical mode) ----------------------
@@ -404,7 +67,7 @@ def test_build_jrc_mosaic_grid_covers_the_full_globe_at_the_configured_step():
 def test_tile_dst_window_maps_a_10x10deg_tile_to_the_expected_cell_block():
     """A tile at the NW-most corner (N90/W180-equivalent bounds) must map to
     row/col 0 -- and every tile must be exactly (10/step_deg) cells square,
-    matching JRC's own fixed tiling scheme."""
+    matching JRC's/MODIS's own fixed tiling scheme."""
     n = round(10.0 / JRC_MOSAIC_GRID_STEP_DEG)
     row0, row1, col0, col1 = tile_dst_window((-180.0, 80.0, -170.0, 90.0))
     assert (row0, col0) == (0, 0)
@@ -563,7 +226,7 @@ def test_ensure_jrc_tile_cached_skips_download_when_already_cached(tmp_path, mon
 
 
 def test_ensure_jrc_tile_cached_raises_and_leaves_no_file_on_corrupt_download(tmp_path, monkeypatch):
-    """Same truncation risk as ensure_gumbel_fit_cached -- confirmed live during
+    """Same truncation risk as ensure_jrc_tile_extents_cached -- confirmed live during
     issue #371's spike that a 271-tile batch download against this host CAN be
     interrupted mid-transfer for individual tiles."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -614,3 +277,256 @@ def test_save_and_load_jrc_hazard_mosaic_round_trips(tmp_path):
     assert list(loaded_lat) == [10.0, 0.0]
     assert list(loaded_lon) == [20.0, 30.0]
     assert not os.path.exists(path + ".tmp")
+
+
+# ---- NASA LANCE MODIS Flood Product (Live mode) ---------------------------------
+
+
+def test_modis_flood_tile_bounds_nw_corner_is_h0v0():
+    """h counts east from -180, v counts south from +90, both in 10deg steps
+    (https://modis-land.gsfc.nasa.gov/MODLAND_grid.html) -- h0v0 is therefore the
+    NW-most tile."""
+    lon_min, lat_min, lon_max, lat_max = modis_flood_tile_bounds(0, 0)
+    assert (lon_min, lat_max) == (-180.0, 90.0)
+    assert (lon_max, lat_min) == (-170.0, 80.0)
+
+
+def test_modis_flood_tile_bounds_steps_10deg_per_hv_increment():
+    lon_min_a, lat_min_a, lon_max_a, lat_max_a = modis_flood_tile_bounds(19, 6)
+    lon_min_b, lat_min_b, lon_max_b, lat_max_b = modis_flood_tile_bounds(20, 7)
+    assert lon_min_b - lon_min_a == 10.0
+    assert lat_max_a - lat_max_b == 10.0
+    assert lon_max_a - lon_min_a == 10.0
+    assert lat_max_a - lat_min_a == 10.0
+
+
+def test_modis_flood_listing_url_encodes_year_and_day_of_year():
+    import datetime
+
+    url = modis_flood_listing_url(datetime.datetime(2026, 8, 30, tzinfo=datetime.timezone.utc))
+    assert "temporalRanges=2026-242" in url
+    assert "products=MCDWD_L3_F1C_NRT" in url
+
+
+def test_parse_modis_flood_listing_extracts_h_v_and_builds_a_fallback_download_url():
+    payload = {"content": [{"name": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.tif"}]}
+    tiles = parse_modis_flood_listing(payload)
+    assert tiles == [
+        {
+            "h": 19,
+            "v": 6,
+            "filename": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.tif",
+            "download_url": (
+                "https://nrt3.modaps.eosdis.nasa.gov/archive/allData/61/"
+                "MCDWD_L3_F1C_NRT/2026/242/"
+                "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.tif"
+            ),
+        }
+    ]
+
+
+def test_parse_modis_flood_listing_prefers_an_explicit_downloads_link():
+    payload = {"content": [{
+        "name": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.tif",
+        "downloadsLink": "https://example.test/explicit-link.tif",
+    }]}
+    tiles = parse_modis_flood_listing(payload)
+    assert tiles[0]["download_url"] == "https://example.test/explicit-link.tif"
+
+
+def test_parse_modis_flood_listing_skips_entries_that_dont_match_the_filename_grammar():
+    payload = {"content": [{"name": "some-unrelated-file.txt"}, {"name": ""}]}
+    assert parse_modis_flood_listing(payload) == []
+
+
+def test_resolve_earthdata_token_reads_the_env_var(monkeypatch):
+    monkeypatch.setenv("EARTHDATA_TOKEN", "  a-token  ")
+    assert resolve_earthdata_token("flood_risk_live") == "a-token"
+
+
+def test_resolve_earthdata_token_is_none_when_unset(monkeypatch):
+    monkeypatch.delenv("EARTHDATA_TOKEN", raising=False)
+    assert resolve_earthdata_token("flood_risk_live") is None
+
+
+def test_fetch_modis_flood_listing_sends_a_bearer_token_and_parses_the_response():
+    import datetime
+
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"content": [
+        {"name": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.tif"}
+    ]}
+    with patch("requests.get", return_value=fake_response) as mock_get:
+        tiles = fetch_modis_flood_listing(
+            datetime.datetime(2026, 8, 30, tzinfo=datetime.timezone.utc), "tok123"
+        )
+
+    assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok123"}
+    fake_response.raise_for_status.assert_called_once()
+    assert tiles[0]["h"] == 19 and tiles[0]["v"] == 6
+
+
+def test_modis_flood_tile_is_current_false_when_never_cached(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tile = {"h": 19, "v": 6, "filename": "x.tif"}
+    assert modis_flood_tile_is_current(tile) is False
+
+
+def test_ensure_modis_flood_tile_cached_downloads_and_writes_the_name_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tif_path = tmp_path / "src.tif"
+    _write_tiny_reclass_tif(str(tif_path), np.array([[0, 3]], dtype=np.uint8), (0.0, 0.0, 10.0, 10.0))
+    valid_bytes = tif_path.read_bytes()
+    tile = {
+        "h": 19, "v": 6, "filename": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.111.tif",
+        "download_url": "https://example.test/tile.tif",
+    }
+
+    with patch("atmos_gl.lib.gfs.download_whole", return_value=valid_bytes) as mock_download:
+        path = ensure_modis_flood_tile_cached(tile, "tok123")
+
+    assert mock_download.call_args.kwargs["headers"] == {"Authorization": "Bearer tok123"}
+    assert path == modis_flood_tile_cache_path(19, 6)
+    assert os.path.exists(path)
+    assert modis_flood_tile_is_current(tile) is True
+
+
+def test_ensure_modis_flood_tile_cached_raises_and_leaves_no_file_on_corrupt_download(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tile = {
+        "h": 19, "v": 6, "filename": "MCDWD_L3_F1C_NRT.A2026242.h19v06.061.111.tif",
+        "download_url": "https://example.test/tile.tif",
+    }
+
+    with patch("atmos_gl.lib.gfs.download_whole", return_value=b"not a real tif"):
+        with pytest.raises(Exception):
+            ensure_modis_flood_tile_cached(tile, "tok123")
+
+    dest = modis_flood_tile_cache_path(19, 6)
+    assert not os.path.exists(dest)
+    assert not os.path.exists(dest + ".tmp")
+
+
+def test_prune_stale_modis_flood_tiles_removes_only_expired_tiles(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tile = {
+        "h": 1, "v": 1, "filename": "old.tif",
+        "download_url": "https://example.test/tile.tif",
+    }
+    tif_path = tmp_path / "src.tif"
+    _write_tiny_reclass_tif(str(tif_path), np.array([[0]], dtype=np.uint8), (0.0, 0.0, 10.0, 10.0))
+    with patch("atmos_gl.lib.gfs.download_whole", return_value=tif_path.read_bytes()):
+        old_path = ensure_modis_flood_tile_cached(tile, "tok")
+        fresh_path = ensure_modis_flood_tile_cached(
+            {**tile, "h": 2, "filename": "fresh.tif"}, "tok"
+        )
+
+    from atmos_gl.lib.flood_risk import MODIS_FLOOD_STALE_S
+
+    old_time = time.time() - (MODIS_FLOOD_STALE_S + 3600)
+    os.utime(old_path, (old_time, old_time))
+    os.utime(old_path + ".name", (old_time, old_time))
+
+    pruned = prune_stale_modis_flood_tiles()
+
+    assert pruned is True
+    assert not os.path.exists(old_path)
+    assert not os.path.exists(old_path + ".name")
+    assert os.path.exists(fresh_path)
+
+
+def test_prune_stale_modis_flood_tiles_returns_false_when_nothing_cached_yet(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert prune_stale_modis_flood_tiles() is False
+
+
+def test_cached_modis_flood_tiles_parses_h_v_from_cache_filenames(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tile = {"h": 3, "v": 4, "filename": "x.tif", "download_url": "https://example.test/tile.tif"}
+    tif_path = tmp_path / "src.tif"
+    _write_tiny_reclass_tif(str(tif_path), np.array([[0]], dtype=np.uint8), (0.0, 0.0, 10.0, 10.0))
+    with patch("atmos_gl.lib.gfs.download_whole", return_value=tif_path.read_bytes()):
+        ensure_modis_flood_tile_cached(tile, "tok")
+
+    tiles = cached_modis_flood_tiles()
+
+    assert tiles == [(3, 4, modis_flood_tile_cache_path(3, 4))]
+
+
+def test_resample_modis_flood_tile_onto_grid_binarizes_flood_value_only(tmp_path):
+    """Only pixel value 3 (Flood, unusual) becomes 1 -- normal water (1), the
+    not-yet-populated recurring-flood code (2), and insufficient-data (255) must
+    all render as 0 (transparent), not just 255. The Flood pixel here is
+    adjacent to the water (1) pixel, so it survives the water-adjacency filter
+    (see MODIS_FLOOD_WATER_ADJACENCY_PX) -- the filter itself is covered
+    separately below."""
+    values = np.array([[0, 1], [2, 3]], dtype=np.uint8)
+    path = str(tmp_path / "tile.tif")
+    _write_tiny_reclass_tif(path, values, (0.0, 0.0, 10.0, 10.0))
+
+    dst_lat = np.array([7.5, 2.5])
+    dst_lon = np.array([2.5, 7.5])
+    out = resample_modis_flood_tile_onto_grid(path, dst_lat, dst_lon)
+
+    assert out[1, 1] == 1  # overlaps the source's "3" (Flood) pixel
+    assert set(np.unique(out)) <= {0, 1}
+
+
+def test_resample_modis_flood_tile_onto_grid_keeps_flood_within_adjacency_radius_of_water(tmp_path):
+    """Confirmed live against real NZ tiles (h34v13/h35v12/h35v13): isolated Flood
+    pixels far from any mapped water cluster in steep terrain (Fiordland, Aoraki/
+    Mt Cook) with no nearby water at all -- this product is cloud-shadow-screened
+    but not terrain-shadow-screened, so low-sun-angle terrain shadow gets
+    misclassified as flood there. A Flood pixel exactly at the adjacency radius
+    from water must still be kept."""
+    from atmos_gl.lib.flood_risk import MODIS_FLOOD_WATER_ADJACENCY_PX
+
+    row = [0] * 10
+    row[0] = 1  # water
+    row[MODIS_FLOOD_WATER_ADJACENCY_PX] = 3  # flood, exactly at the radius
+    values = np.array([row], dtype=np.uint8)
+    path = str(tmp_path / "tile_near_water.tif")
+    _write_tiny_reclass_tif(path, values, (0.0, 0.0, 10.0, 10.0))
+
+    dst_lat = np.array([5.0])
+    dst_lon = np.arange(10) + 0.5
+    out = resample_modis_flood_tile_onto_grid(path, dst_lat, dst_lon)
+
+    assert out[0, MODIS_FLOOD_WATER_ADJACENCY_PX] == 1
+
+
+def test_resample_modis_flood_tile_onto_grid_drops_flood_beyond_adjacency_radius_of_water(tmp_path):
+    """A Flood pixel one step beyond MODIS_FLOOD_WATER_ADJACENCY_PX from the
+    nearest water pixel is dropped -- this is exactly the NZ mountain-terrain
+    false-positive case (see the "kept" test above)."""
+    from atmos_gl.lib.flood_risk import MODIS_FLOOD_WATER_ADJACENCY_PX
+
+    row = [0] * 10
+    row[0] = 1  # water
+    row[MODIS_FLOOD_WATER_ADJACENCY_PX + 1] = 3  # flood, one pixel too far
+    values = np.array([row], dtype=np.uint8)
+    path = str(tmp_path / "tile_far_from_water.tif")
+    _write_tiny_reclass_tif(path, values, (0.0, 0.0, 10.0, 10.0))
+
+    dst_lat = np.array([5.0])
+    dst_lon = np.arange(10) + 0.5
+    out = resample_modis_flood_tile_onto_grid(path, dst_lat, dst_lon)
+
+    assert out[0, MODIS_FLOOD_WATER_ADJACENCY_PX + 1] == 0
+
+
+def test_resample_modis_flood_tile_onto_grid_treats_insufficient_data_as_no_flood(tmp_path):
+    values = np.full((2, 2), 255, dtype=np.uint8)
+    path = str(tmp_path / "tile_nodata.tif")
+    _write_tiny_reclass_tif(path, values, (0.0, 0.0, 10.0, 10.0))
+
+    out = resample_modis_flood_tile_onto_grid(path, np.array([5.0]), np.array([5.0]))
+
+    assert out[0, 0] == 0
+
+
+def test_modis_flood_value_is_the_flood_unusual_pixel_code():
+    """Pinned so an accidental edit is caught -- 3 is Table 7's "Flood (unusual)"
+    code in the official User Guide, not the "surface water" (1) or
+    "recurring flood" (2, not yet populated) codes."""
+    assert MODIS_FLOOD_VALUE == 3

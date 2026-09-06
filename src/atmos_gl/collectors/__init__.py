@@ -35,8 +35,17 @@ Synchronous file caches  (CACHE_COLLECTORS)  — write an image/netCDF under {wo
                period), mosaicked once from 271 open-FTP tiles into a single global
                raster and cached forever (FloodRiskHistoricalCollector, collectors/
                flood_risk.py) -- shares its settings_section ("flood_risk") with
-               FIELD_COLLECTOR_CLASSES' FloodRiskLiveCollector below, same
-               forecast/baseline settings-sharing split as greenhouse_gases.
+               FloodRiskLiveCollector below, same forecast/baseline
+               settings-sharing split as greenhouse_gases.
+  flood_risk_live — NASA LANCE MODIS flood product ("Observed Current
+               Inundation"), rebuilt from up to 287 10x10deg GeoTIFF tiles every
+               cycle a tile changes or expires (FloodRiskLiveCollector,
+               collectors/flood_risk.py). A CollectorBase subclass like its
+               Historical sibling above -- there's no forecast-hour dimension to
+               this data at all, unlike the FIELD_COLLECTOR_CLASSES sources below
+               (this used to fetch a GloFAS ensemble discharge FORECAST via EWDS
+               and live in that list; abandoned for real, unfixable OOM/network
+               problems -- see collectors/flood_risk.py's module docstring).
 
   These are single fields (one daily netCDF / one global image), not per-forecast-hour
   products, so they live as file caches rather than fieldstore rows. The layer updaters
@@ -48,12 +57,6 @@ Field collectors  (FIELD_COLLECTOR_CLASSES)  — fieldstore-backed, per-forecast
   gfs_waves.py, rtofs_currents.py). Driven per-cycle by CollectorService, sharing one
   CycleContext baseline probe. Canonical list, imported by both service.py and
   routes/status.py so a new field collector can't drift between the two.
-  flood_risk_live — GloFAS ensemble discharge forecast via EWDS, classified against
-               ETH's Gumbel-fit return-period thresholds (FloodRiskLiveCollector,
-               collectors/flood_risk.py) -- its own baseline_key ("glofas") and
-               settings_section ("flood_risk", NOT the shared "data_collector" the
-               other three use), since GloFAS's daily-run/EWDS-credential shape is
-               independent of the GFS/RTOFS baseline the other three share.
 
 Async collectors  (EMBEDDABLE_COLLECTORS)    — persistent coroutines
 --------------------------------------------------------------------------
@@ -115,6 +118,7 @@ CACHE_COLLECTORS = (
     CamsEgg4BaselineCollector,
     AirQualityCollector,
     FloodRiskHistoricalCollector,
+    FloodRiskLiveCollector,
 )
 
 # Field collectors (fieldstore-backed, FieldCollectorBase), driven per-cycle by
@@ -123,7 +127,7 @@ CACHE_COLLECTORS = (
 # run in one place while silently missing from the other (previously two hand-copied
 # tuples that could drift).
 FIELD_COLLECTOR_CLASSES = (
-    GfsAtmosCollector, GfsWavesCollector, RtofsCurrentsCollector, FloodRiskLiveCollector,
+    GfsAtmosCollector, GfsWavesCollector, RtofsCurrentsCollector,
 )
 
 # Async collectors (AsyncCollectorBase persistent coroutines) that can run in-process,

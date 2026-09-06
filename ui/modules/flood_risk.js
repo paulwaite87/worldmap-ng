@@ -2,8 +2,8 @@ import { createStaticFillLayer } from './_webglfill.js';
 import { standardLegend, insertBeforeExtension } from './_legend.js';
 import { opacityUniform } from './_opacity.js';
 
-// Both Live (GloFAS forecast) and Historical (JRC 100yr hazard) are rendered as
-// STATIC (non-animated) textures, not per-forecast-hour ones: FloodRiskUpdater.run()
+// Both Live (NASA MODIS observed flooding) and Historical (JRC 100yr hazard) are
+// rendered as STATIC (non-animated) textures, not per-forecast-hour ones: FloodRiskUpdater.run()
 // (tasks/flood_risk.py) already renders both variants every cycle and publishes only
 // the currently-configured mode's latest content to the canonical path, mirroring
 // greenhouse_gases.js's species/mode toggle exactly -- so switching modes here needs
@@ -29,15 +29,14 @@ function buildCategoryLUT(colors) {
     return lut;
 }
 
-// Live: GloFAS ensemble return-period severity band (RETURN_PERIODS_YEARS, 3 tiers).
-// Mirrors tasks/flood_risk.py's _LIVE_ENCODE_DOMAIN == (0.0, 3.0).
+// Live: NASA MODIS observed flood detection -- binary (0 = no flood, 1 = MODIS
+// Flood pixel value 3, the 1-Day cloud-shadow-screened product). Mirrors
+// tasks/flood_risk.py's _LIVE_ENCODE_DOMAIN == (0.0, 1.0).
 const LIVE_COLORS = [
     [0, 0, 0, 0],
-    [1.0, 0.85, 0.2, 0.55],
-    [1.0, 0.55, 0.0, 0.75],
-    [0.85, 0.05, 0.05, 0.9],
+    [0.85, 0.05, 0.05, 0.85],
 ];
-const LIVE_LABELS = ['None', '2yr', '5yr', '20yr'];
+const LIVE_LABELS = ['None', 'Flood'];
 
 // Historical: JRC RP100 hazard-depth reclass category (0-4, JRC's own scale). Mirrors
 // tasks/flood_risk.py's _HISTORICAL_ENCODE_DOMAIN == (0.0, 4.0). NOT comparable to
@@ -53,7 +52,7 @@ const HISTORICAL_COLORS = [
 ];
 const HISTORICAL_LABELS = ['None', '<1m', '1-3m', '3-10m', '>10m'];
 
-const ENCODE_DOMAIN = { live: [0, 3], historical: [0, 4] };
+const ENCODE_DOMAIN = { live: [0, 1], historical: [0, 4] };
 const modeOf = (cfg) => (String(cfg.mode || 'live').toLowerCase() === 'historical' ? 'historical' : 'live');
 
 // Matches FloodRiskUpdater._variant_path's f"{base}_{suffix}{ext}" naming
@@ -75,8 +74,8 @@ function keySpecFor(cfg) {
     }
     return {
         lut: buildCategoryLUT(LIVE_COLORS),
-        vmin: 0, vmax: 3, ticks: [0, 1, 2, 3],
-        title: 'Flood Severity (Live Forecast)',
+        vmin: 0, vmax: 1, ticks: [0, 1],
+        title: 'Observed Flooding (NASA MODIS, 1-Day)',
         tickFormat: (v) => LIVE_LABELS[Math.round(v)] ?? '',
     };
 }

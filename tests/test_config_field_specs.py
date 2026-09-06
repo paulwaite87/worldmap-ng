@@ -976,12 +976,14 @@ def test_config_page_renders_flood_risk_mode_select_with_both_options():
 
 def test_config_page_renders_glofas_warning_markup_for_the_flood_risk_gate():
     """Locks that the admin page has the key-warn-glofas element the JS in
-    config.html looks for (`data.flood_risk.RULE__missing_glofas_apikey` ->
+    config.html looks for (`data.flood_risk.RULE__missing_earthdata_token` ->
     classList.remove('d-none')) -- the gate itself (mode-specific, only Live mode
-    needs GLOFAS_API_KEY) is exercised at the /api/config data layer by
+    needs EARTHDATA_TOKEN) is exercised at the /api/config data layer by
     test_flood_risk_config_gate.py; this just confirms the page has somewhere to
-    surface that flag."""
+    surface that flag. Element id kept as "key-warn-glofas" (not renamed) even
+    though the credential itself changed -- see collectors/flood_risk.py's module
+    docstring for Live mode's data-source pivot away from GloFAS."""
     resp = client.get("/config")
     html = resp.text
     assert 'id="key-warn-glofas"' in html
-    assert "RULE__missing_glofas_apikey" in html
+    assert "RULE__missing_earthdata_token" in html

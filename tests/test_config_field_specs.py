@@ -646,25 +646,22 @@ def test_validate_against_specs_now_validates_enabled_as_a_boolean():
     assert "clouds.enabled" in errors[0]
 
 
-@pytest.mark.parametrize("section", ["clouds", "shipping", "shipping_collector"])
+@pytest.mark.parametrize("section", [
+    "clouds", "shipping", "shipping_collector",
+    "sst", "currents", "temperature", "ozone", "stormwatch", "greenhouse_gases",
+])
 def test_config_page_still_renders_each_enabled_checkbox_exactly_once(section):
     """Regression guard: now that these sections have a FIELD_SPECS entry for
     `enabled`, render_field_group's existing exclusion (_field_macros.html) must still
-    keep it out of the generic properties-tab rendering, so the Show/Background tab's
-    own hardcoded checkbox remains the only one -- no duplicate id in the page."""
+    keep it out of the generic properties-tab rendering, so the Show tab's own
+    hardcoded checkbox remains the only one -- no duplicate id in the page. Climate
+    sections (sst/currents/.../greenhouse_gases) used to render as a mutually-exclusive
+    radio group (`radio__{section}`) instead -- since independent Climate layers can now
+    be shown together, they're plain `{section}__enabled` checkboxes like every other
+    section."""
     resp = client.get("/config")
     html = resp.text
     assert html.count(f'id="{section}__enabled"') == 1
-
-
-def test_config_page_still_renders_each_climate_radio_exactly_once():
-    """Same regression guard as above, for the climate tab's radio-exclusivity group
-    -- sst.enabled now has a FIELD_SPECS entry too, but must still render only via the
-    Show tab's radio__sst input, not also inline in the Climate properties tab."""
-    resp = client.get("/config")
-    html = resp.text
-    assert html.count('id="radio__sst"') == 1
-    assert 'id="sst__enabled"' not in html
 
 
 def test_config_page_renders_housekeeper_enabled_as_a_visible_toggle():

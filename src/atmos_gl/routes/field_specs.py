@@ -74,6 +74,11 @@ class SliderSpec:
 class SelectSpec:
     options: list  # [(value, label), ...]
     personalizable: bool = False
+    # Optional small hint rendered under the <select> (same spot as multiselect's
+    # "Hold Ctrl..." hint) -- for a choice whose effect depends on another field in
+    # the same section (e.g. sst.palette only applying in absolute mode), so the
+    # picker doesn't look broken/no-op when that other field is set the "wrong" way.
+    help_text: str | None = None
     kind: str = field(default="select", init=False)
 
 
@@ -668,7 +673,7 @@ FIELD_SPECS = {
         ("vivid", "Vivid"),
         ("deep", "Deep"),
         ("ocean", "Ocean"),
-    ], personalizable=True),
+    ], personalizable=True, help_text="Only applies in Absolute mode -- Anomaly mode always uses a fixed red/blue scale."),
     ("sst", "min_c"): _MIN_MAX_C,
     ("sst", "max_c"): _MIN_MAX_C,
     ("sst", "cache_expiry_days"): _CACHE_EXPIRY_DAYS,

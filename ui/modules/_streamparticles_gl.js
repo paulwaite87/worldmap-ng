@@ -669,6 +669,21 @@ export function computeParams(cfg, mappers, prevCohRadius) {
 // MapLibre instance required. See the notes at this function's call site in
 // createCurrentParticleGLLayer's render() on why longitude is derived from viewport
 // pixel width rather than getBounds()'s east/west (globe projection).
+//
+// MIN_H and the spanLon floor below are LAST-RESORT guards against a literally
+// degenerate (near-zero-height/width) box from a malformed getBounds() report --
+// NOT a "reasonable minimum useful size". They used to be 0.006 (~1.08 deg) and 1.0
+// deg respectively, sized as if this were the latter -- but a normal ~1024px-wide
+// viewport's TRUE visible span drops below both of those well inside ordinary zoom
+// levels (~zoom 8 for latitude, ~zoom 10 for longitude), long before MapLibre's own
+// ~22 zoom ceiling. Past that point the respawn box silently stopped shrinking with
+// the actual viewport while curLengthZoomFactor (this file's render(), which DOES
+// track zoom correctly all the way to ~22 since #347) kept shrinking -- so respawns
+// kept landing uniformly across a patch far bigger than what was actually on screen,
+// and the fraction of them a viewer could actually see collapsed accordingly. Live
+// symptom: "hardly any particles active" from about zoom 10 up. Sized tiny enough
+// (matching curLengthZoomFactor's own 1e-6 floor) to stay out of the way up to
+// MapLibre's ceiling instead.
 export function viewBox(map) {
     try {
         const b = map.getBounds();
@@ -677,7 +692,7 @@ export function viewBox(map) {
         const padLat = Math.max(0, n - s) * 0.15;
         n = Math.min(89.9, n + padLat); s = Math.max(-89.9, s - padLat);
         let yN = Math.max(0, (90 - n) / 180), yS = Math.min(1, (90 - s) / 180);
-        const MIN_H = 0.006;
+        const MIN_H = 1e-6;
         if (yS - yN < MIN_H) {
             const cy = Math.min(1 - MIN_H * 0.5, Math.max(MIN_H * 0.5, (yN + yS) * 0.5));
             yN = cy - MIN_H * 0.5; yS = cy + MIN_H * 0.5;
@@ -688,7 +703,7 @@ export function viewBox(map) {
         const worldPx = 512 * Math.pow(2, map.getZoom());
         let spanLon = (vw / worldPx) * 360 * 1.4;
         if (!Number.isFinite(spanLon) || spanLon >= 350) return [0, yN, 1, yS];
-        spanLon = Math.max(1.0, spanLon);
+        spanLon = Math.max(1e-4, spanLon);
         const cl = ((((c.lng + 180) % 360) + 360) % 360) / 360;
         const half = (spanLon / 360) / 2;
         const lonMin = ((((cl - half) % 1) + 1) % 1);

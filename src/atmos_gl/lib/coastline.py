@@ -62,24 +62,45 @@ def _gshhg_shapefile_path() -> str:
     )
 
 
+def _gshhg_lake_shapefile_path() -> str:
+    """GSHHG's own L2 tier: lake polygons (islands-in-lakes/ponds-in-islands are L3/
+    L4, not needed here). Confirmed live in the same zip bundle as L1, ~4.3MB vs
+    L1's ~34MB (6,601 lake polygons vs 144,749 coastline polygons) -- see
+    coastline_land_mask's exclude_lakes parameter."""
+    return os.path.join(
+        _gshhg_cache_dir(), "GSHHS_shp", _GSHHG_TIER, f"GSHHS_{_GSHHG_TIER}_L2.shp"
+    )
+
+
 def _download_gshhg_if_needed() -> str:
-    """Download + extract just the 'h' tier land layer (L1: coastline, GSHHG's own
-    layer-numbering convention) from the GSHHG bundle, if not already cached on disk.
-    Returns the .shp path. Raises on failure -- callers catch and fall back gracefully,
-    same contract the old Natural Earth path had."""
+    """Download + extract the 'h' tier coastline (L1) and lake (L2) layers from the
+    GSHHG bundle, if either isn't already cached on disk. Returns the L1 .shp path
+    (the only caller that used this return value, _load_gshhg_land_union, doesn't
+    need the lake path -- _load_gshhg_lake_union calls this for its download-only
+    side effect and reads _gshhg_lake_shapefile_path() itself). Raises on failure --
+    callers catch and fall back gracefully, same contract the old Natural Earth path
+    had.
+
+    Both tiers in one download: the whole zip (~149MB) is fetched either way, so
+    extracting L2's ~4.3MB alongside L1 costs nothing extra bandwidth-wise, and
+    avoids ever downloading the same 149MB zip twice."""
     shp_path = _gshhg_shapefile_path()
-    if os.path.exists(shp_path):
+    lake_shp_path = _gshhg_lake_shapefile_path()
+    if os.path.exists(shp_path) and os.path.exists(lake_shp_path):
         return shp_path
 
     from atmos_gl.lib.gfs import download_whole
 
     cache_dir = _gshhg_cache_dir()
     os.makedirs(cache_dir, exist_ok=True)
-    logger.info(f"Downloading GSHHG '{_GSHHG_TIER}' coastline data (one-time)...")
+    logger.info(f"Downloading GSHHG '{_GSHHG_TIER}' coastline+lake data (one-time)...")
     data = download_whole(_GSHHG_URL, timeout=180)
-    prefix = f"GSHHS_shp/{_GSHHG_TIER}/GSHHS_{_GSHHG_TIER}_L1."
+    prefixes = (
+        f"GSHHS_shp/{_GSHHG_TIER}/GSHHS_{_GSHHG_TIER}_L1.",
+        f"GSHHS_shp/{_GSHHG_TIER}/GSHHS_{_GSHHG_TIER}_L2.",
+    )
     with zipfile.ZipFile(BytesIO(data)) as zf:
-        members = [m for m in zf.namelist() if m.startswith(prefix)]
+        members = [m for m in zf.namelist() if m.startswith(prefixes)]
         zf.extractall(cache_dir, members)
     return shp_path
 
@@ -126,6 +147,63 @@ def _load_gshhg_land_union():
     with open(union_cache_path, "wb") as f:
         f.write(shapely.to_wkb(land))
     return land
+
+
+def _gshhg_lake_union_cache_path() -> str:
+    return os.path.join(_gshhg_cache_dir(), f"gshhg_{_GSHHG_TIER}_lake_union.wkb")
+
+
+def _load_gshhg_lake_union():
+    """The unioned GSHHG lake geometry (global L2 tier), loaded from a disk cache if
+    present -- mirrors _load_gshhg_land_union exactly, for the same reason (pay the
+    union cost once per container, not once per render-worker restart). Much cheaper
+    than L1: 6,601 polygons vs 144,749, unioning measured ~4s live (vs L1's ~227s).
+    See coastline_land_mask's exclude_lakes parameter."""
+    import shapely
+
+    union_cache_path = _gshhg_lake_union_cache_path()
+    if os.path.exists(union_cache_path):
+        with open(union_cache_path, "rb") as f:
+            return shapely.from_wkb(f.read())
+
+    import cartopy.io.shapereader as shpreader
+    from shapely.ops import unary_union
+
+    _download_gshhg_if_needed()  # ensures the L2 shapefile is present too
+    reader = shpreader.Reader(_gshhg_lake_shapefile_path())
+    geoms = [shapely.make_valid(g) for g in reader.geometries()]
+    lakes = unary_union(geoms)
+
+    with open(union_cache_path, "wb") as f:
+        f.write(shapely.to_wkb(lakes))
+    return lakes
+
+
+def _gshhg_land_minus_lakes_cache_path() -> str:
+    return os.path.join(_gshhg_cache_dir(), f"gshhg_{_GSHHG_TIER}_land_minus_lakes.wkb")
+
+
+def _load_gshhg_land_minus_lakes():
+    """The "true dry land" geometry: GSHHG's L1 coastline union with L2 lake
+    polygons subtracted out. GSHHG's L1 tier has no concept of an inland water
+    body -- a lake sits entirely inside L1's land polygon -- so this is what
+    coastline_land_mask's exclude_lakes=True actually rasterizes against.
+
+    Disk-cached (like _load_gshhg_land_union/_load_gshhg_lake_union above): the
+    difference() itself measured ~44s live against the full global L1 union, worth
+    paying once per container lifetime, not once per render-worker restart."""
+    import shapely
+
+    cache_path = _gshhg_land_minus_lakes_cache_path()
+    if os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            return shapely.from_wkb(f.read())
+
+    land_minus_lakes = _load_gshhg_land_union().difference(_load_gshhg_lake_union())
+
+    with open(cache_path, "wb") as f:
+        f.write(shapely.to_wkb(land_minus_lakes))
+    return land_minus_lakes
 
 
 def _rasterize_land_mask(land_geom, mesh_lon, mesh_lat):
@@ -175,7 +253,8 @@ def _rasterize_land_mask(land_geom, mesh_lon, mesh_lat):
 
 
 def coastline_land_mask(
-    mesh_lon, mesh_lat, lon_min, lat_min, lon_max, lat_max, dilate: bool = True
+    mesh_lon, mesh_lat, lon_min, lat_min, lon_max, lat_max, dilate: bool = True,
+    exclude_lakes: bool = False,
 ):
     """Boolean land mask (True over land) sampled at the given mesh, cut from true
     GSHHG 'h' coastline geometry (see docs/adr/0013).
@@ -205,6 +284,17 @@ def coastline_land_mask(
     identical binary_dilation, and greenhouse_gases.py's own caller was missed entirely
     -- see docs/adr/0014's "Revisit if" clause, which only anticipated currents/waves)
     -- now every caller gets it correctly, by construction, for free.
+
+    exclude_lakes=False (the default): "land" is GSHHG's L1 coastline union alone --
+    correct for currents/waves/sst/etc, which want ocean-vs-everything-else (a lake
+    is "not open ocean" too, so belongs excluded from those layers' rendered field
+    the same way land is -- L1 already does that for free, since a lake sits inside
+    an L1 land polygon). exclude_lakes=True additionally subtracts GSHHG's L2 lake
+    polygons, so a lake's surface is correctly classified as water, not land --
+    confirmed live needed for FloodRiskUpdater: MODIS's flood detection can't tell a
+    lake from a flooded river either, and since L1 has no concept of an inland water
+    body, a lake reads as "land" and its MODIS-flagged pixels survive an
+    exclude_lakes=False mask unmasked.
     """
     try:
         key = (
@@ -212,10 +302,13 @@ def coastline_land_mask(
             round(lat_min, 2),
             round(lon_max, 2),
             round(lat_max, 2),
+            exclude_lakes,
         )
         land_geom = _COAST_GEOM_CACHE.get(key)
         if land_geom is None:
-            land_geom = _load_gshhg_land_union()
+            land_geom = (
+                _load_gshhg_land_minus_lakes() if exclude_lakes else _load_gshhg_land_union()
+            )
             # Every current caller passes the global bbox (-180/-90/180/90), for which
             # clipping is a no-op -- skip it there rather than pay for an intersection
             # against a huge unioned geometry for zero benefit. Kept correct for a
@@ -250,17 +343,26 @@ class LandMaskCache:
     shape alone is a safe key), but not necessarily: FireWeatherUpdater
     (tasks/fire_weather.py) queries two genuinely different grids per render that
     can coincidentally share a shape, so it includes each grid's latitude
-    endpoints too. `key` is never compared against the mask's actual shape."""
+    endpoints too. `key` is never compared against the mask's actual shape.
+
+    `dilate`/`exclude_lakes` are forwarded to coastline_land_mask (defaults True/
+    False, matching every existing caller's need). A caller instance always
+    requests the same values on every call (each Updater builds its own
+    LandMaskCache), so it's safe to leave both out of `key` -- there is no risk of
+    one setting's result being served back for another."""
 
     def __init__(self, label: str):
         self._label = label
         self._cache = {}
 
-    def get(self, lat, lon, key):
+    def get(self, lat, lon, key, dilate: bool = True, exclude_lakes: bool = False):
         if key in self._cache:
             return self._cache[key]
         mesh_lon, mesh_lat = np.meshgrid(np.asarray(lon), np.asarray(lat))
-        land = coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
+        land = coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0,
+            dilate=dilate, exclude_lakes=exclude_lakes,
+        )
         self._cache[key] = land
         if land is not None:
             logger.info(

@@ -9,7 +9,7 @@ tests: this seam tests what gets rendered/published, not rendering internals
 (covered separately below).
 """
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -118,6 +118,10 @@ def _bare_updater_for_rendering(workdir, output_path):
     u.section = "flood_risk"
     u.output_path = output_path
     u.settings = {}
+    # Default: no land mask applied (mirrors FireWeatherUpdater's bare-updater
+    # test fixture) -- tests that care about masking set a real return value.
+    u._land_mask_cache = MagicMock()
+    u._land_mask_cache.get.return_value = None
     return u
 
 
@@ -157,6 +161,58 @@ def test_render_live_skips_re_render_when_already_fresh(tmp_path):
 
     assert second == first
     assert os.path.getmtime(second) == first_mtime
+
+
+# ---- _render_live's land mask (issue: Marlborough Sounds false-positive) -------
+
+
+def test_render_live_zeroes_non_land_cells_when_a_land_mask_is_available(tmp_path):
+    """resample_modis_flood_tile_onto_grid's own 'near surface water' rule can't
+    tell sea from river/lake water, so a coastal sea cell reads as flooded just
+    for being adjacent to itself -- the land mask is what actually removes that
+    class of false positive."""
+    out_path = tmp_path / "data" / "flood_risk.png"
+    u = _bare_updater_for_rendering(str(tmp_path), str(out_path))
+    mosaic_path = modis_flood_mosaic_cache_path(str(tmp_path))
+    band = np.array([[1, 1], [1, 1]], dtype=np.uint8)
+    lat, lon = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    save_jrc_hazard_mosaic(mosaic_path, band, lat, lon)
+    land = np.array([[True, False], [False, True]])
+    u._land_mask_cache.get.return_value = land
+
+    with patch("atmos_gl.tasks.flood_risk.encode_frames") as mock_encode:
+        u._render_live()
+
+    encoded_band = mock_encode.call_args.args[0][0]
+    assert encoded_band.tolist() == [[1.0, 0.0], [0.0, 1.0]]
+    call_lat, call_lon, call_shape = u._land_mask_cache.get.call_args.args
+    assert call_lat.tolist() == lat.tolist()
+    assert call_lon.tolist() == lon.tolist()
+    assert call_shape == band.shape
+    # dilate=False, exclude_lakes=True -- unlike every other LandMaskCache caller,
+    # see _render_live's own docstring for why.
+    assert u._land_mask_cache.get.call_args.kwargs == {
+        "dilate": False,
+        "exclude_lakes": True,
+    }
+
+
+def test_render_live_leaves_band_unmasked_when_land_mask_is_unavailable(tmp_path):
+    """LandMaskCache.get returns None on geometry-load failure (no network for the
+    one-time GSHHG fetch) -- render must still degrade gracefully, same contract
+    every other LandMaskCache caller (currents/waves/FireWeatherUpdater) has."""
+    out_path = tmp_path / "data" / "flood_risk.png"
+    u = _bare_updater_for_rendering(str(tmp_path), str(out_path))
+    mosaic_path = modis_flood_mosaic_cache_path(str(tmp_path))
+    band = np.array([[0, 1], [1, 0]], dtype=np.uint8)
+    save_jrc_hazard_mosaic(mosaic_path, band, np.array([1.0, 0.0]), np.array([0.0, 1.0]))
+    u._land_mask_cache.get.return_value = None
+
+    with patch("atmos_gl.tasks.flood_risk.encode_frames") as mock_encode:
+        u._render_live()
+
+    encoded_band = mock_encode.call_args.args[0][0]
+    assert encoded_band.tolist() == [[0.0, 1.0], [1.0, 0.0]]
 
 
 def test_render_historical_writes_a_texture_when_mosaic_is_cached(tmp_path):

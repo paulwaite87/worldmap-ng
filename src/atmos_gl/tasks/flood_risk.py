@@ -31,6 +31,7 @@ import os
 
 import numpy as np
 
+from atmos_gl.lib.coastline import LandMaskCache
 from atmos_gl.lib.config import AtmosGLConfig
 from atmos_gl.lib.flood_risk import (
     jrc_hazard_mosaic_cache_path,
@@ -58,6 +59,7 @@ class FloodRiskUpdater(Updater):
         # Both modes are single-shot cached rasters now (no forecast-hour series
         # for either), so status_product stays unset -- layer_status() falls back
         # to the decaying-freshness formula, same as sst/clouds/markers.
+        self._land_mask_cache = LandMaskCache("FloodRiskLive")
 
     def _variant_path(self, suffix: str) -> str:
         base, ext = os.path.splitext(self.output_path)
@@ -68,7 +70,33 @@ class FloodRiskUpdater(Updater):
         every cycle it finds a changed or newly-expired tile) into its own "_live"
         variant path, if it's cached and the render isn't already fresh. Mirrors
         _render_historical exactly -- both modes are single continuously-refreshed
-        cached rasters, not per-forecast-hour series."""
+        cached rasters, not per-forecast-hour series.
+
+        Cut to land via LandMaskCache before encoding: resample_modis_flood_tile_
+        onto_grid's own "flood pixel near surface water" rule doesn't distinguish
+        sea from river/lake water, so a coastal sea inlet (real-world example: the
+        Marlborough Sounds, NZ) reads as "near water" just by being sea, and gets
+        flagged as flooded the same as an actual flooded river. The true coastline
+        cut removes that class of false positive the same way currents/waves/
+        FireWeatherUpdater already use it for theirs.
+
+        dilate=False (unlike every other LandMaskCache caller): the default
+        dilate=True GROWS land by one cell so a bilinear-filtered GPU texture's
+        coastline blend zone never bleeds colour onto land (see
+        coastline_land_mask's own docstring) -- the opposite of what this layer
+        needs. Growing land shrinks the water mask, which at this mosaic's ~0.05deg
+        (~5km) resolution reclassified real narrow-channel sea cells (confirmed
+        live: the Marlborough Sounds) as land, letting their false-positive flood
+        value through unmasked. dilate=False keeps the raw geometric
+        classification -- still limited by the mosaic's own grid resolution for
+        the very narrowest channels, but no longer making that worse.
+
+        exclude_lakes=True: GSHHG's L1 coastline tier has no concept of an inland
+        water body, so a lake reads as plain "land" and its MODIS-flagged surface
+        (same "near surface water" false-positive as the sea/river case above)
+        survives an ocean-only mask unmasked -- confirmed live over real lakes.
+        exclude_lakes=True additionally cuts GSHHG's L2 lake polygons (see
+        coastline_land_mask's own docstring)."""
         mosaic_path = modis_flood_mosaic_cache_path(self.workdir)
         if not os.path.exists(mosaic_path):
             return None
@@ -76,7 +104,13 @@ class FloodRiskUpdater(Updater):
         out = self._variant_path("live")
         sig = self._settings_signature({})
         if not self._is_render_fresh(out, [mosaic_path], sig):
-            band, _lat, _lon = load_jrc_hazard_mosaic(mosaic_path)
+            band, lat, lon = load_jrc_hazard_mosaic(mosaic_path)
+            land = self._land_mask_cache.get(
+                lat, lon, band.shape, dilate=False, exclude_lakes=True
+            )
+            if land is not None:
+                band = band.copy()
+                band[~land] = 0
             encode_frames([band.astype(np.float32)], out, *_LIVE_ENCODE_DOMAIN)
             self._write_render_signature(out, sig)
             logger.info(f"{self.section}: rendered live inundation texture.")

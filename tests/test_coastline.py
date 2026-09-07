@@ -72,6 +72,42 @@ def test_get_passes_the_global_bbox():
     assert args[2:] == (-180.0, -90.0, 180.0, 90.0)
 
 
+def test_get_defaults_to_dilate_true_and_exclude_lakes_false():
+    cache = LandMaskCache("Test")
+    with patch(
+        "atmos_gl.lib.coastline.coastline_land_mask", return_value=None
+    ) as mock_coast:
+        cache.get(lat=[0.0], lon=[0.0], key=(1, 1))
+
+    assert mock_coast.call_args.kwargs == {"dilate": True, "exclude_lakes": False}
+
+
+def test_get_forwards_dilate_false():
+    """FloodRiskUpdater passes dilate=False (see its own _render_live docstring) --
+    growing land would shrink the water mask and let real narrow-channel sea cells
+    (e.g. the Marlborough Sounds) get reclassified as land."""
+    cache = LandMaskCache("Test")
+    with patch(
+        "atmos_gl.lib.coastline.coastline_land_mask", return_value=None
+    ) as mock_coast:
+        cache.get(lat=[0.0], lon=[0.0], key=(1, 1), dilate=False)
+
+    assert mock_coast.call_args.kwargs == {"dilate": False, "exclude_lakes": False}
+
+
+def test_get_forwards_exclude_lakes_true():
+    """FloodRiskUpdater also passes exclude_lakes=True -- GSHHG's L1 tier has no
+    concept of an inland water body, so without this a lake reads as land and
+    survives the flood-risk mask unmasked."""
+    cache = LandMaskCache("Test")
+    with patch(
+        "atmos_gl.lib.coastline.coastline_land_mask", return_value=None
+    ) as mock_coast:
+        cache.get(lat=[0.0], lon=[0.0], key=(1, 1), dilate=False, exclude_lakes=True)
+
+    assert mock_coast.call_args.kwargs == {"dilate": False, "exclude_lakes": True}
+
+
 def test_get_caches_none_too_when_geometry_is_unavailable():
     """Matches the pre-extraction behavior exactly: a None result (geometry load
     failure) is cached like any other value, so a key that failed once doesn't
@@ -195,6 +231,72 @@ def test_coastline_land_mask_returns_none_on_load_failure():
     assert result is None
 
 
+# ---- exclude_lakes: a lake sits inside GSHHG's L1 land polygon, so without this a
+# lake reads as land (confirmed live needed for FloodRiskUpdater) --------------------
+
+def test_coastline_land_mask_exclude_lakes_false_uses_plain_land_union():
+    land = _square_land(0.0, 0.0, 10.0, 10.0)
+    mesh_lon, mesh_lat = np.meshgrid([5.0], [5.0])
+    with patch(
+        "atmos_gl.lib.coastline._load_gshhg_land_union", return_value=land
+    ) as mock_land, patch(
+        "atmos_gl.lib.coastline._load_gshhg_land_minus_lakes"
+    ) as mock_land_minus_lakes:
+        mask = coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0, dilate=False
+        )
+
+    assert mask.tolist() == [[True]]
+    mock_land.assert_called_once()
+    mock_land_minus_lakes.assert_not_called()
+
+
+def test_coastline_land_mask_exclude_lakes_true_uses_land_minus_lakes():
+    """A lake cell (inside GSHHG's L1 land, but subtracted out by
+    _load_gshhg_land_minus_lakes) must classify as NOT land."""
+    land = _square_land(0.0, 0.0, 10.0, 10.0)
+    # Lake carved out of the middle of the land square -- (5,5) is inside the lake.
+    lake_hole = land.difference(_square_land(4.0, 4.0, 6.0, 6.0))
+    mesh_lon, mesh_lat = np.meshgrid([2.0, 5.0], [2.0, 5.0])
+    with patch("atmos_gl.lib.coastline._load_gshhg_land_union") as mock_land, patch(
+        "atmos_gl.lib.coastline._load_gshhg_land_minus_lakes", return_value=lake_hole
+    ):
+        mask = coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0,
+            dilate=False, exclude_lakes=True,
+        )
+
+    assert mask[0, 0] == True  # noqa: E712 -- (2,2): plain land
+    assert mask[1, 1] == False  # noqa: E712 -- (5,5): inside the lake
+    mock_land.assert_not_called()
+
+
+def test_coastline_land_mask_caches_exclude_lakes_separately_from_plain():
+    """Same bbox, differing only by exclude_lakes -- must not share a cache entry
+    (a lake-excluded mask silently reused as the plain one, or vice versa, would be
+    a correctness bug for whichever caller got the wrong one)."""
+    plain = _square_land(0.0, 0.0, 10.0, 10.0)
+    minus_lakes = _square_land(0.0, 0.0, 5.0, 5.0)
+    mesh_lon, mesh_lat = np.meshgrid([1.0], [1.0])
+    with patch(
+        "atmos_gl.lib.coastline._load_gshhg_land_union", return_value=plain
+    ) as mock_land, patch(
+        "atmos_gl.lib.coastline._load_gshhg_land_minus_lakes", return_value=minus_lakes
+    ) as mock_minus_lakes:
+        coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
+        coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0, exclude_lakes=True
+        )
+        # Repeat both -- each should still hit its own cache entry, not recompute.
+        coastline_land_mask(mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0)
+        coastline_land_mask(
+            mesh_lon, mesh_lat, -180.0, -90.0, 180.0, 90.0, exclude_lakes=True
+        )
+
+    mock_land.assert_called_once()
+    mock_minus_lakes.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # _load_gshhg_land_union
 # ---------------------------------------------------------------------------
@@ -232,6 +334,108 @@ def test_load_gshhg_land_union_repairs_invalid_geometries_before_union():
     # Both squares touch at one corner (0,0)-(1,1)-(2,2) -- the union covers both.
     assert result.contains(Point(0.5, 0.5))
     assert result.contains(Point(1.5, 1.5))
+
+
+# ---------------------------------------------------------------------------
+# _load_gshhg_lake_union / _load_gshhg_land_minus_lakes
+# ---------------------------------------------------------------------------
+
+def test_load_gshhg_lake_union_reads_from_disk_cache_if_present():
+    cached = _square_land(1.0, 1.0, 2.0, 2.0)
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"fake-lake-wkb")), \
+         patch("shapely.from_wkb", return_value=cached) as mock_from_wkb:
+        result = coastline_mod._load_gshhg_lake_union()
+
+    assert result is cached
+    mock_from_wkb.assert_called_once_with(b"fake-lake-wkb")
+
+
+def test_load_gshhg_lake_union_downloads_and_unions_when_not_cached():
+    mock_reader = MagicMock()
+    mock_reader.geometries.return_value = [
+        _square_land(0.0, 0.0, 1.0, 1.0),
+        _square_land(1.0, 1.0, 2.0, 2.0),
+    ]
+
+    with patch("os.path.exists", return_value=False), \
+         patch(
+             "atmos_gl.lib.coastline._download_gshhg_if_needed"
+         ) as mock_download, \
+         patch("cartopy.io.shapereader.Reader", return_value=mock_reader), \
+         patch("builtins.open", mock_open()):
+        result = coastline_mod._load_gshhg_lake_union()
+
+    mock_download.assert_called_once()
+    assert result.contains(Point(0.5, 0.5))
+    assert result.contains(Point(1.5, 1.5))
+
+
+def test_load_gshhg_land_minus_lakes_reads_from_disk_cache_if_present():
+    cached = _square_land(1.0, 1.0, 2.0, 2.0)
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data=b"fake-diff-wkb")), \
+         patch("shapely.from_wkb", return_value=cached) as mock_from_wkb, \
+         patch("atmos_gl.lib.coastline._load_gshhg_land_union") as mock_land, \
+         patch("atmos_gl.lib.coastline._load_gshhg_lake_union") as mock_lakes:
+        result = coastline_mod._load_gshhg_land_minus_lakes()
+
+    assert result is cached
+    mock_from_wkb.assert_called_once_with(b"fake-diff-wkb")
+    mock_land.assert_not_called()
+    mock_lakes.assert_not_called()
+
+
+def test_load_gshhg_land_minus_lakes_subtracts_lakes_from_land_when_not_cached():
+    land = _square_land(0.0, 0.0, 10.0, 10.0)
+    lake = _square_land(4.0, 4.0, 6.0, 6.0)
+
+    with patch("os.path.exists", return_value=False), \
+         patch("atmos_gl.lib.coastline._load_gshhg_land_union", return_value=land), \
+         patch("atmos_gl.lib.coastline._load_gshhg_lake_union", return_value=lake), \
+         patch("builtins.open", mock_open()):
+        result = coastline_mod._load_gshhg_land_minus_lakes()
+
+    assert result.contains(Point(1.0, 1.0))  # plain land
+    assert not result.contains(Point(5.0, 5.0))  # inside the lake -- subtracted out
+
+
+# ---------------------------------------------------------------------------
+# _download_gshhg_if_needed
+# ---------------------------------------------------------------------------
+
+def test_download_gshhg_if_needed_skips_download_when_both_tiers_cached():
+    with patch("os.path.exists", return_value=True), \
+         patch("atmos_gl.lib.gfs.download_whole") as mock_download:
+        coastline_mod._download_gshhg_if_needed()
+
+    mock_download.assert_not_called()
+
+
+def test_download_gshhg_if_needed_downloads_when_the_lake_tier_is_missing():
+    """A deployment that already has L1 cached from before exclude_lakes existed
+    must still fetch L2 -- checking only L1's existence would leave lake exclusion
+    silently broken forever on any already-running container."""
+    exists_calls = []
+
+    def fake_exists(path):
+        exists_calls.append(path)
+        return "L1" in path  # L1 present, L2 missing
+
+    with patch("os.path.exists", side_effect=fake_exists), \
+         patch("os.makedirs"), \
+         patch("atmos_gl.lib.gfs.download_whole", return_value=b"PK\x03\x04") as mock_download, \
+         patch("zipfile.ZipFile") as mock_zip:
+        mock_zip.return_value.__enter__.return_value.namelist.return_value = [
+            "GSHHS_shp/h/GSHHS_h_L1.shp",
+            "GSHHS_shp/h/GSHHS_h_L2.shp",
+        ]
+        coastline_mod._download_gshhg_if_needed()
+
+    mock_download.assert_called_once()
+    extracted = mock_zip.return_value.__enter__.return_value.extractall.call_args.args[1]
+    assert "GSHHS_shp/h/GSHHS_h_L1.shp" in extracted
+    assert "GSHHS_shp/h/GSHHS_h_L2.shp" in extracted
 
 
 # ---------------------------------------------------------------------------
